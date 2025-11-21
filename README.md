@@ -212,6 +212,54 @@ curl http://localhost:8080/_stats
 
 See [HTTP API documentation](docs/http-api.md) for complete API reference.
 
+### CLI Mode (Interactive REPL)
+
+Use the interactive command-line interface for database administration and development:
+
+```bash
+# Build CLI
+make cli
+
+# Run CLI with default data directory (./laura-data)
+./bin/laura-cli
+
+# Run with custom data directory
+./bin/laura-cli /path/to/data
+```
+
+**Example CLI Session:**
+
+```bash
+laura> use users
+Switched to collection 'users'
+
+laura:users> insert {"name": "Alice", "age": 25}
+Inserted document with _id: 507f1f77bcf86cd799439011
+
+laura:users> find {"age": {"$gte": 20}}
+Found 1 document(s):
+[1] {
+  "_id": "507f1f77bcf86cd799439011",
+  "age": 25,
+  "name": "Alice"
+}
+
+laura:users> createindex email {"unique": true}
+Created index on field 'email' (unique=true)
+
+laura:users> stats
+Collection statistics for 'users': {...}
+```
+
+**Available Commands:**
+- Collection operations: `insert`, `find`, `update`, `delete`, `count`
+- Index management: `createindex`, `getindexes`
+- Information: `stats`, `show collections`
+- MongoDB-like syntax: `<collection>.find({query})`
+- Help: `help` or `?`
+
+See [CLI documentation](cmd/laura-cli/README.md) for complete command reference.
+
 ### Binary Protocol Server Mode
 
 ```bash

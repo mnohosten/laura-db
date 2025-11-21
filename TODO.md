@@ -211,7 +211,7 @@ LauraDB is a functional MongoDB-like document database with most core features i
 ### Priority 4: Operations & Management
 
 #### Administration Tools
-- [ ] CLI tool for database administration
+- [x] **CLI tool for database administration** ✨ NEW
 - [ ] Database backup and restore
 - [ ] Import/export utilities (JSON, CSV)
 - [ ] Database repair tools
@@ -345,10 +345,11 @@ LauraDB is a functional MongoDB-like document database with most core features i
 - ✅ Added array query operators ($elemMatch, $size)
 - ✅ Added regex query operator ($regex) with comprehensive pattern support
 - ✅ Added $each modifier for bulk array operations ($push/$addToSet)
+- ✅ **Built interactive CLI tool** with REPL for database administration
 - ✅ Fixed time.Time support in document value type system
 - ✅ Created comprehensive test suites for all new operators (116+ tests)
-- ✅ Added Makefile for easier building
-- ✅ Created BUILD.md, TESTING.md, and BENCHMARKS.md documentation
+- ✅ Added Makefile for easier building (including CLI build target)
+- ✅ Created BUILD.md, TESTING.md, BENCHMARKS.md, and CLI documentation
 - ✅ Established performance baselines (93K inserts/sec, 24K queries/sec)
 
 ---

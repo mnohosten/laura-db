@@ -1,16 +1,23 @@
-.PHONY: all build clean test server examples help
+.PHONY: all build clean test server cli examples help
 
 # Default target
 all: build
 
 # Build everything
-build: server examples
+build: server cli examples
 
 # Build main server
 server:
 	@echo "Building LauraDB server..."
 	@go build -o laura ./cmd/server/main.go
 	@echo "✓ Built: laura"
+
+# Build CLI tool
+cli:
+	@echo "Building LauraDB CLI..."
+	@mkdir -p bin
+	@go build -o bin/laura-cli ./cmd/laura-cli
+	@echo "✓ Built: bin/laura-cli"
 
 # Build all examples
 examples:
@@ -113,8 +120,9 @@ help:
 	@echo ""
 	@echo "Usage:"
 	@echo "  make              Build everything"
-	@echo "  make build        Build server and examples"
+	@echo "  make build        Build server, CLI, and examples"
 	@echo "  make server       Build main server only"
+	@echo "  make cli          Build CLI tool only"
 	@echo "  make examples     Build examples only"
 	@echo "  make test         Run tests"
 	@echo "  make test-coverage Run tests with coverage summary"
