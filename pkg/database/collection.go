@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/mnohosten/laura-db/pkg/aggregation"
+	"github.com/mnohosten/laura-db/pkg/cache"
 	"github.com/mnohosten/laura-db/pkg/document"
 	"github.com/mnohosten/laura-db/pkg/index"
 	"github.com/mnohosten/laura-db/pkg/mvcc"
@@ -14,20 +15,22 @@ import (
 
 // Collection represents a collection of documents
 type Collection struct {
-	name      string
-	documents map[string]*document.Document // _id -> document
-	indexes   map[string]*index.Index       // index name -> index
-	txnMgr    *mvcc.TransactionManager
-	mu        sync.RWMutex
+	name       string
+	documents  map[string]*document.Document // _id -> document
+	indexes    map[string]*index.Index       // index name -> index
+	txnMgr     *mvcc.TransactionManager
+	queryCache *cache.LRUCache               // Query result cache
+	mu         sync.RWMutex
 }
 
 // NewCollection creates a new collection
 func NewCollection(name string, txnMgr *mvcc.TransactionManager) *Collection {
 	coll := &Collection{
-		name:      name,
-		documents: make(map[string]*document.Document),
-		indexes:   make(map[string]*index.Index),
-		txnMgr:    txnMgr,
+		name:       name,
+		documents:  make(map[string]*document.Document),
+		indexes:    make(map[string]*index.Index),
+		txnMgr:     txnMgr,
+		queryCache: cache.NewLRUCache(1000, 5*time.Minute), // 1000 queries, 5min TTL
 	}
 
 	// Create default index on _id
@@ -82,6 +85,9 @@ func (c *Collection) InsertOne(doc map[string]interface{}) (string, error) {
 	// Store document
 	c.documents[id] = d
 
+	// Invalidate query cache on write
+	c.queryCache.Clear()
+
 	return id, nil
 }
 
@@ -128,6 +134,43 @@ func (c *Collection) FindWithOptions(filter map[string]interface{}, options *Que
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
+	// Generate cache key from query parameters
+	var sort []interface{}
+	var projection map[string]bool
+	skip := 0
+	limit := 0
+
+	if options.Sort != nil {
+		// Convert []query.SortField to []interface{}
+		sort = make([]interface{}, len(options.Sort))
+		for i, sf := range options.Sort {
+			sort[i] = map[string]interface{}{
+				"field":     sf.Field,
+				"ascending": sf.Ascending,
+			}
+		}
+	}
+	if options.Projection != nil {
+		projection = options.Projection
+	}
+	if options.Skip > 0 {
+		skip = options.Skip
+	}
+	if options.Limit > 0 {
+		limit = options.Limit
+	}
+
+	cacheKey := cache.GenerateKey(filter, sort, skip, limit, projection)
+
+	// Check cache
+	if cached, found := c.queryCache.Get(cacheKey); found {
+		// Cache hit - return cached results
+		if results, ok := cached.([]*document.Document); ok {
+			return results, nil
+		}
+	}
+
+	// Cache miss - execute query
 	q := query.NewQuery(filter)
 
 	if options.Projection != nil {
@@ -143,7 +186,15 @@ func (c *Collection) FindWithOptions(filter map[string]interface{}, options *Que
 		q.WithSkip(options.Skip)
 	}
 
-	return c.executeQuery(q)
+	results, err := c.executeQuery(q)
+	if err != nil {
+		return nil, err
+	}
+
+	// Store in cache
+	c.queryCache.Put(cacheKey, results)
+
+	return results, nil
 }
 
 // executeQuery executes a query with query planning and index optimization
@@ -173,7 +224,14 @@ func (c *Collection) UpdateOne(filter map[string]interface{}, update map[string]
 	}
 
 	// Apply update
-	return c.applyUpdate(doc, update)
+	if err := c.applyUpdate(doc, update); err != nil {
+		return err
+	}
+
+	// Invalidate query cache on write
+	c.queryCache.Clear()
+
+	return nil
 }
 
 // UpdateMany updates all documents matching the filter
@@ -195,6 +253,9 @@ func (c *Collection) UpdateMany(filter map[string]interface{}, update map[string
 		}
 		count++
 	}
+
+	// Invalidate query cache on write
+	c.queryCache.Clear()
 
 	return count, nil
 }
@@ -510,6 +571,9 @@ func (c *Collection) DeleteOne(filter map[string]interface{}) error {
 	// Delete document
 	delete(c.documents, id)
 
+	// Invalidate query cache on write
+	c.queryCache.Clear()
+
 	return nil
 }
 
@@ -538,6 +602,9 @@ func (c *Collection) DeleteMany(filter map[string]interface{}) (int, error) {
 		delete(c.documents, id)
 		count++
 	}
+
+	// Invalidate query cache on write
+	c.queryCache.Clear()
 
 	return count, nil
 }
