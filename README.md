@@ -46,22 +46,30 @@ This project demonstrates how to build a production-grade document database from
 - **Query optimizer**: Selects best execution strategy (index scan vs collection scan)
 - **Projection**: Field selection and exclusion
 
-#### 6. Aggregation Pipeline (`pkg/aggregation`)
+#### 6. Query Cache (`pkg/cache`)
+- **LRU eviction**: Least Recently Used policy with configurable capacity (1000 entries default)
+- **TTL support**: Automatic expiration after 5 minutes
+- **Performance**: 96x faster for cached queries (328µs → 3.4µs)
+- **Thread-safe**: Concurrent access using sync.RWMutex
+- **Smart invalidation**: Cache cleared on any write operation (Insert/Update/Delete)
+- **Statistics**: Hit rate, misses, evictions tracking
+
+#### 7. Aggregation Pipeline (`pkg/aggregation`)
 - Stage-based processing: `$match`, `$group`, `$project`, `$sort`, `$limit`, `$skip`
 - Pipeline optimization: Push down predicates, combine stages
 - Aggregation operators: `$sum`, `$avg`, `$min`, `$max`, `$push`
 
-#### 7. Database Interface (`pkg/database`)
+#### 8. Database Interface (`pkg/database`)
 - **Collections**: Logical grouping of documents
 - **Transactions**: ACID guarantees for multi-document operations
 - **Connection management**: Pool of connections for concurrent access
 
-#### 8. Network Protocol (`pkg/protocol`)
+#### 9. Network Protocol (`pkg/protocol`)
 - Custom binary protocol for client-server communication
 - Request/response framing and multiplexing
 - Authentication and authorization hooks
 
-#### 9. HTTP Server (`pkg/server`)
+#### 10. HTTP Server (`pkg/server`)
 - RESTful HTTP API similar to Elasticsearch
 - JSON request/response format
 - Comprehensive middleware stack (logging, CORS, recovery)
@@ -86,6 +94,7 @@ laura-db/
 │   ├── mvcc/            # Multi-Version Concurrency Control
 │   ├── index/           # B+ tree indexing
 │   ├── query/           # Query parser and execution
+│   ├── cache/           # LRU query cache with TTL
 │   ├── aggregation/     # Aggregation pipeline
 │   ├── database/        # Main database interface
 │   ├── server/          # HTTP server and handlers

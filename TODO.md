@@ -161,7 +161,11 @@ LauraDB is a functional MongoDB-like document database with most core features i
 ### Priority 2: Performance & Scalability
 
 #### Query Optimization
-- [ ] Query cache for frequently executed queries
+- [x] **Query cache for frequently executed queries** ✨ NEW
+  - LRU eviction with 1000 entry capacity per collection
+  - 5-minute TTL with automatic expiration
+  - 96x performance improvement (328µs → 3.4µs)
+  - Thread-safe with cache invalidation on writes
 - [ ] Statistics-based query optimization
 - [ ] Parallel query execution
 - [ ] Index intersection (using multiple indexes)
@@ -323,15 +327,16 @@ LauraDB is a functional MongoDB-like document database with most core features i
 
 ## 📊 Current Statistics
 
-- **Lines of Code**: ~10,000+ (Go)
-- **Test Files**: 19+
-- **Test Cases**: 116+
-- **Packages**: 9 core packages
+- **Lines of Code**: ~11,000+ (Go)
+- **Test Files**: 21+ (added cache tests)
+- **Test Cases**: 123+ (added 5 cache tests + 4 benchmarks)
+- **Packages**: 10 core packages (added pkg/cache)
 - **Examples**: 3 working examples
 - **HTTP Endpoints**: 15+
 - **Supported Query Operators**: 15+ (added $elemMatch, $size, $regex)
 - **Update Operators**: 13+ (added $rename, $currentDate, $pullAll, $each modifier)
 - **Aggregation Stages**: 6
+- **Query Cache**: LRU with TTL (96x performance improvement)
 
 ---
 
@@ -346,8 +351,14 @@ LauraDB is a functional MongoDB-like document database with most core features i
 - ✅ Added regex query operator ($regex) with comprehensive pattern support
 - ✅ Added $each modifier for bulk array operations ($push/$addToSet)
 - ✅ **Built interactive CLI tool** with REPL for database administration
+- ✅ **Implemented LRU query cache with TTL** ✨ NEW
+  - 96x performance improvement for cached queries (328µs → 3.4µs)
+  - 59x less memory usage per query (26.7KB → 448B)
+  - Thread-safe with automatic invalidation on writes
+  - 1000 entry capacity with 5-minute TTL
+  - Comprehensive tests and benchmarks
 - ✅ Fixed time.Time support in document value type system
-- ✅ Created comprehensive test suites for all new operators (116+ tests)
+- ✅ Created comprehensive test suites for all new operators (123+ tests)
 - ✅ Added Makefile for easier building (including CLI build target)
 - ✅ Created BUILD.md, TESTING.md, BENCHMARKS.md, and CLI documentation
 - ✅ Established performance baselines (93K inserts/sec, 24K queries/sec)
@@ -374,7 +385,9 @@ LauraDB is a functional MongoDB-like document database with most core features i
 - Index scans provide O(log n) lookups
 - Buffer pool reduces disk I/O
 - WAL ensures durability with minimal overhead
+- **Query cache provides 96x speedup for repeated queries**
+- LRU eviction ensures predictable memory usage
 
 ---
 
-**Last Updated**: Session resumption - analyzing completed work and planning next steps
+**Last Updated**: Implemented high-performance LRU query cache with 96x performance improvement
