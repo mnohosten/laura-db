@@ -40,7 +40,7 @@ This project demonstrates how to build a production-grade document database from
 - **Query operators**:
   - Comparison: `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`
   - Logical: `$and`, `$or`, `$not`
-  - Array: `$in`, `$nin`, `$all`
+  - Array: `$in`, `$nin`, `$all`, `$elemMatch`, `$size`
   - Element: `$exists`, `$type`
 - **Query optimizer**: Selects best execution strategy (index scan vs collection scan)
 - **Projection**: Field selection and exclusion

@@ -68,6 +68,8 @@ func EvaluateOperator(op Operator, fieldValue interface{}, operatorValue interfa
 		return evaluateRegex(fieldValue, operatorValue)
 	case OpSize:
 		return evaluateSize(fieldValue, operatorValue), nil
+	case OpElemMatch:
+		return evaluateElemMatch(fieldValue, operatorValue)
 	default:
 		return false, fmt.Errorf("unsupported operator: %s", op)
 	}
@@ -236,4 +238,49 @@ func toInt64(v interface{}) (int64, bool) {
 	default:
 		return 0, false
 	}
+}
+
+// evaluateElemMatch checks if array contains element matching all conditions
+func evaluateElemMatch(value interface{}, conditions interface{}) (bool, error) {
+	// Value must be an array
+	arrVal := reflect.ValueOf(value)
+	if arrVal.Kind() != reflect.Slice && arrVal.Kind() != reflect.Array {
+		return false, nil
+	}
+
+	// Conditions must be a map of operators
+	condMap, ok := conditions.(map[string]interface{})
+	if !ok {
+		return false, fmt.Errorf("$elemMatch requires an object with conditions")
+	}
+
+	// Check each array element
+	for i := 0; i < arrVal.Len(); i++ {
+		element := arrVal.Index(i).Interface()
+		matchesAll := true
+
+		// Element must match ALL conditions
+		for opStr, opValue := range condMap {
+			op := Operator(opStr)
+
+			// Evaluate the operator against this element
+			matches, err := EvaluateOperator(op, element, opValue)
+			if err != nil {
+				return false, err
+			}
+
+			if !matches {
+				matchesAll = false
+				break
+			}
+		}
+
+		// If this element matches all conditions, return true
+		if matchesAll {
+			return true, nil
+		}
+	}
+
+	// No element matched all conditions
+	return false, nil
 }

@@ -1,5 +1,7 @@
 package document
 
+import "time"
+
 // Type represents the BSON data type of a value
 type Type byte
 
@@ -78,6 +80,8 @@ func NewValue(data interface{}) *Value {
 		v.Type = TypeBinary
 	case ObjectID:
 		v.Type = TypeObjectID
+	case time.Time:
+		v.Type = TypeTimestamp
 	case []interface{}:
 		v.Type = TypeArray
 	case map[string]interface{}:

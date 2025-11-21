@@ -3,6 +3,7 @@ package database
 import (
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/mnohosten/laura-db/pkg/aggregation"
 	"github.com/mnohosten/laura-db/pkg/document"
@@ -354,6 +355,77 @@ func (c *Collection) applyUpdate(doc *document.Document, update map[string]inter
 										doc.Set(field, arr[:len(arr)-1])
 									}
 								}
+							}
+						}
+					}
+				}
+			}
+		} else if key == "$rename" {
+			// $rename operator - rename a field
+			if renameMap, ok := value.(map[string]interface{}); ok {
+				for oldField, newFieldVal := range renameMap {
+					if newField, ok := newFieldVal.(string); ok {
+						// Get value from old field
+						if val, exists := doc.Get(oldField); exists {
+							// Set new field
+							doc.Set(newField, val)
+							// Delete old field
+							doc.Delete(oldField)
+						}
+					}
+				}
+			}
+		} else if key == "$currentDate" {
+			// $currentDate operator - set field to current date/time
+			if dateMap, ok := value.(map[string]interface{}); ok {
+				for field, typeSpec := range dateMap {
+					// Check if user wants timestamp or date (default is date)
+					useTimestamp := false
+					if specMap, ok := typeSpec.(map[string]interface{}); ok {
+						if typeVal, ok := specMap["$type"]; ok {
+							if typeStr, ok := typeVal.(string); ok {
+								useTimestamp = (typeStr == "timestamp")
+							}
+						}
+					}
+
+					// Set current time
+					if useTimestamp {
+						doc.Set(field, time.Now().Unix())
+					} else {
+						doc.Set(field, time.Now())
+					}
+				}
+			}
+		} else if key == "$pullAll" {
+			// $pullAll operator - remove all instances of multiple values from array
+			if pullAllMap, ok := value.(map[string]interface{}); ok {
+				for field, pullValues := range pullAllMap {
+					if currentVal, exists := doc.Get(field); exists {
+						if arr, ok := currentVal.([]interface{}); ok {
+							if valuesToRemove, ok := pullValues.([]interface{}); ok {
+								// Create a map for O(1) lookup
+								removeMap := make(map[interface{}]bool)
+								for _, v := range valuesToRemove {
+									removeMap[v] = true
+								}
+
+								// Filter array
+								newArr := make([]interface{}, 0)
+								for _, elem := range arr {
+									// Check if element should be removed
+									shouldRemove := false
+									for removeVal := range removeMap {
+										if compareValues2(elem, removeVal) {
+											shouldRemove = true
+											break
+										}
+									}
+									if !shouldRemove {
+										newArr = append(newArr, elem)
+									}
+								}
+								doc.Set(field, newArr)
 							}
 						}
 					}
