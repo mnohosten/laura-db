@@ -145,17 +145,19 @@ func (c *Collection) FindWithOptions(filter map[string]interface{}, options *Que
 	return c.executeQuery(q)
 }
 
-// executeQuery executes a query
+// executeQuery executes a query with query planning and index optimization
 func (c *Collection) executeQuery(q *query.Query) ([]*document.Document, error) {
-	// Get all documents
-	docs := make([]*document.Document, 0, len(c.documents))
-	for _, doc := range c.documents {
-		docs = append(docs, doc)
-	}
+	// Create query planner
+	planner := query.NewQueryPlanner(c.indexes)
 
-	// Execute query
-	executor := query.NewExecutor(docs)
-	return executor.Execute(q)
+	// Generate execution plan
+	plan := planner.Plan(q)
+
+	// Create executor with document map for efficient lookups
+	executor := query.NewExecutorWithMap(c.documents)
+
+	// Execute with plan (will use index if beneficial)
+	return executor.ExecuteWithPlan(q, plan)
 }
 
 // UpdateOne updates a single document matching the filter
@@ -221,6 +223,137 @@ func (c *Collection) applyUpdate(doc *document.Document, update map[string]inter
 						if currentNum, ok := toFloat64(currentVal); ok {
 							if incNum, ok := toFloat64(incVal); ok {
 								doc.Set(field, currentNum+incNum)
+							}
+						}
+					}
+				}
+			}
+		} else if key == "$mul" {
+			// $mul operator - multiply field by value
+			if mulMap, ok := value.(map[string]interface{}); ok {
+				for field, mulVal := range mulMap {
+					if currentVal, exists := doc.Get(field); exists {
+						if currentNum, ok := toFloat64(currentVal); ok {
+							if mulNum, ok := toFloat64(mulVal); ok {
+								doc.Set(field, currentNum*mulNum)
+							}
+						}
+					} else {
+						// Field doesn't exist, set to 0 (MongoDB behavior)
+						doc.Set(field, 0)
+					}
+				}
+			}
+		} else if key == "$min" {
+			// $min operator - update field if value is less than current
+			if minMap, ok := value.(map[string]interface{}); ok {
+				for field, minVal := range minMap {
+					if currentVal, exists := doc.Get(field); exists {
+						if currentNum, ok := toFloat64(currentVal); ok {
+							if minNum, ok := toFloat64(minVal); ok {
+								if minNum < currentNum {
+									doc.Set(field, minNum)
+								}
+							}
+						}
+					} else {
+						// Field doesn't exist, set to minVal (MongoDB behavior)
+						doc.Set(field, minVal)
+					}
+				}
+			}
+		} else if key == "$max" {
+			// $max operator - update field if value is greater than current
+			if maxMap, ok := value.(map[string]interface{}); ok {
+				for field, maxVal := range maxMap {
+					if currentVal, exists := doc.Get(field); exists {
+						if currentNum, ok := toFloat64(currentVal); ok {
+							if maxNum, ok := toFloat64(maxVal); ok {
+								if maxNum > currentNum {
+									doc.Set(field, maxNum)
+								}
+							}
+						}
+					} else {
+						// Field doesn't exist, set to maxVal (MongoDB behavior)
+						doc.Set(field, maxVal)
+					}
+				}
+			}
+		} else if key == "$push" {
+			// $push operator - add element to array
+			if pushMap, ok := value.(map[string]interface{}); ok {
+				for field, pushVal := range pushMap {
+					if currentVal, exists := doc.Get(field); exists {
+						// Field exists, append to array
+						if arr, ok := currentVal.([]interface{}); ok {
+							arr = append(arr, pushVal)
+							doc.Set(field, arr)
+						}
+					} else {
+						// Field doesn't exist, create new array
+						doc.Set(field, []interface{}{pushVal})
+					}
+				}
+			}
+		} else if key == "$pull" {
+			// $pull operator - remove elements matching value
+			if pullMap, ok := value.(map[string]interface{}); ok {
+				for field, pullVal := range pullMap {
+					if currentVal, exists := doc.Get(field); exists {
+						if arr, ok := currentVal.([]interface{}); ok {
+							newArr := make([]interface{}, 0)
+							for _, elem := range arr {
+								if !compareValues2(elem, pullVal) {
+									newArr = append(newArr, elem)
+								}
+							}
+							doc.Set(field, newArr)
+						}
+					}
+				}
+			}
+		} else if key == "$addToSet" {
+			// $addToSet operator - add element only if not already in array
+			if addMap, ok := value.(map[string]interface{}); ok {
+				for field, addVal := range addMap {
+					if currentVal, exists := doc.Get(field); exists {
+						// Field exists, check if value already in array
+						if arr, ok := currentVal.([]interface{}); ok {
+							found := false
+							for _, elem := range arr {
+								if compareValues2(elem, addVal) {
+									found = true
+									break
+								}
+							}
+							if !found {
+								arr = append(arr, addVal)
+								doc.Set(field, arr)
+							}
+						}
+					} else {
+						// Field doesn't exist, create new array
+						doc.Set(field, []interface{}{addVal})
+					}
+				}
+			}
+		} else if key == "$pop" {
+			// $pop operator - remove first (-1) or last (1) element from array
+			if popMap, ok := value.(map[string]interface{}); ok {
+				for field, popVal := range popMap {
+					if currentVal, exists := doc.Get(field); exists {
+						if arr, ok := currentVal.([]interface{}); ok {
+							if len(arr) > 0 {
+								if popInt, ok := toFloat64(popVal); ok {
+									if popInt < 0 {
+										// Remove first element
+										doc.Set(field, arr[1:])
+									} else {
+										// Remove last element
+										doc.Set(field, arr[:len(arr)-1])
+									}
+								}
 							}
 						}
 					}
@@ -397,6 +530,34 @@ func (c *Collection) Stats() map[string]interface{} {
 	}
 }
 
+// Explain returns the execution plan for a query
+func (c *Collection) Explain(filter map[string]interface{}) map[string]interface{} {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	// Create query
+	q := query.NewQuery(filter)
+
+	// Create query planner
+	planner := query.NewQueryPlanner(c.indexes)
+
+	// Generate execution plan
+	plan := planner.Plan(q)
+
+	// Get plan explanation
+	explanation := plan.Explain()
+
+	// Add collection info
+	explanation["collection"] = c.name
+	explanation["totalDocuments"] = len(c.documents)
+	explanation["availableIndexes"] = make([]string, 0, len(c.indexes))
+	for indexName := range c.indexes {
+		explanation["availableIndexes"] = append(explanation["availableIndexes"].([]string), indexName)
+	}
+
+	return explanation
+}
+
 // findOneInternal finds one document (caller must hold lock)
 func (c *Collection) findOneInternal(filter map[string]interface{}) (*document.Document, error) {
 	docs, err := c.findInternal(filter)
@@ -434,4 +595,31 @@ func toFloat64(v interface{}) (float64, bool) {
 	default:
 		return 0, false
 	}
+}
+
+// compareValues2 compares two values for equality (for array operations)
+func compareValues2(a, b interface{}) bool {
+	// Try numeric comparison
+	aVal, aOk := toFloat64(a)
+	bVal, bOk := toFloat64(b)
+	if aOk && bOk {
+		return aVal == bVal
+	}
+
+	// String comparison
+	aStr, aOk := a.(string)
+	bStr, bOk := b.(string)
+	if aOk && bOk {
+		return aStr == bStr
+	}
+
+	// Boolean comparison
+	aBool, aOk := a.(bool)
+	bBool, bOk := b.(bool)
+	if aOk && bOk {
+		return aBool == bBool
+	}
+
+	// Direct comparison for other types
+	return a == b
 }

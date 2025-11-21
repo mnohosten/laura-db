@@ -1,6 +1,7 @@
 package query
 
 import (
+	"fmt"
 	"sort"
 
 	"github.com/mnohosten/laura-db/pkg/document"
@@ -8,15 +9,40 @@ import (
 
 // Executor executes queries against a collection of documents
 type Executor struct {
-	documents []*document.Document
-	indexes   map[string]interface{} // Field name -> index
+	documents   []*document.Document
+	documentsMap map[string]*document.Document // _id -> document for index lookups
+	indexes     map[string]interface{}          // Field name -> index
 }
 
 // NewExecutor creates a new query executor
 func NewExecutor(documents []*document.Document) *Executor {
+	// Build document map for O(1) lookups by ID
+	docMap := make(map[string]*document.Document)
+	for _, doc := range documents {
+		if idVal, exists := doc.Get("_id"); exists {
+			idStr := documentIDToString(idVal)
+			docMap[idStr] = doc
+		}
+	}
+
 	return &Executor{
-		documents: documents,
-		indexes:   make(map[string]interface{}),
+		documents:    documents,
+		documentsMap: docMap,
+		indexes:      make(map[string]interface{}),
+	}
+}
+
+// NewExecutorWithMap creates an executor with pre-built document map
+func NewExecutorWithMap(documentsMap map[string]*document.Document) *Executor {
+	documents := make([]*document.Document, 0, len(documentsMap))
+	for _, doc := range documentsMap {
+		documents = append(documents, doc)
+	}
+
+	return &Executor{
+		documents:    documents,
+		documentsMap: documentsMap,
+		indexes:      make(map[string]interface{}),
 	}
 }
 
@@ -60,6 +86,102 @@ func (e *Executor) Execute(query *Query) ([]*document.Document, error) {
 	}
 
 	return results, nil
+}
+
+// ExecuteWithPlan executes a query using a query plan (potentially using indexes)
+func (e *Executor) ExecuteWithPlan(query *Query, plan *QueryPlan) ([]*document.Document, error) {
+	var candidates []*document.Document
+
+	if plan.UseIndex && plan.Index != nil {
+		// Use index to get candidate documents
+		var err error
+		candidates, err = e.executeIndexScan(plan)
+		if err != nil {
+			// Fall back to collection scan if index scan fails
+			candidates = e.documents
+		}
+	} else {
+		// Full collection scan
+		candidates = e.documents
+	}
+
+	// Filter candidates (apply remaining filters after index scan)
+	results := make([]*document.Document, 0)
+	for _, doc := range candidates {
+		matches, err := query.Matches(doc)
+		if err != nil {
+			return nil, err
+		}
+		if matches {
+			results = append(results, doc)
+		}
+	}
+
+	// Sort results
+	if len(query.GetSort()) > 0 {
+		e.sortDocuments(results, query.GetSort())
+	}
+
+	// Apply skip
+	if query.GetSkip() > 0 {
+		if query.GetSkip() >= len(results) {
+			results = []*document.Document{}
+		} else {
+			results = results[query.GetSkip():]
+		}
+	}
+
+	// Apply limit
+	if query.GetLimit() > 0 && query.GetLimit() < len(results) {
+		results = results[:query.GetLimit()]
+	}
+
+	// Apply projection
+	for i, doc := range results {
+		results[i] = query.ApplyProjection(doc)
+	}
+
+	return results, nil
+}
+
+// executeIndexScan retrieves documents using the index
+func (e *Executor) executeIndexScan(plan *QueryPlan) ([]*document.Document, error) {
+	var docIDs []string
+
+	switch plan.ScanType {
+	case ScanTypeIndexExact:
+		// Exact match scan
+		value, exists := plan.Index.Search(plan.ScanKey)
+		if exists {
+			if idStr, ok := value.(string); ok {
+				docIDs = []string{idStr}
+			}
+		}
+
+	case ScanTypeIndexRange:
+		// Range scan
+		_, values := plan.Index.RangeScan(plan.ScanStart, plan.ScanEnd)
+		docIDs = make([]string, 0, len(values))
+		for _, v := range values {
+			if idStr, ok := v.(string); ok {
+				docIDs = append(docIDs, idStr)
+			}
+		}
+
+	default:
+		// Should not happen, but fall back to all documents
+		return e.documents, nil
+	}
+
+	// Convert document IDs to documents
+	docs := make([]*document.Document, 0, len(docIDs))
+	for _, id := range docIDs {
+		if doc, exists := e.documentsMap[id]; exists {
+			docs = append(docs, doc)
+		}
+	}
+
+	return docs, nil
 }
 
 // sortDocuments sorts documents based on sort fields
@@ -158,5 +280,17 @@ func (e *Executor) Explain(query *Query) map[string]interface{} {
 		"sort":               query.GetSort(),
 		"limit":              query.GetLimit(),
 		"skip":               query.GetSkip(),
+	}
+}
+
+// documentIDToString converts a document _id to string, handling ObjectID type
+func documentIDToString(id interface{}) string {
+	switch v := id.(type) {
+	case string:
+		return v
+	case document.ObjectID:
+		return v.Hex()
+	default:
+		return fmt.Sprintf("%v", v)
 	}
 }
