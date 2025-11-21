@@ -42,6 +42,7 @@ This project demonstrates how to build a production-grade document database from
   - Logical: `$and`, `$or`, `$not`
   - Array: `$in`, `$nin`, `$all`, `$elemMatch`, `$size`
   - Element: `$exists`, `$type`
+  - Evaluation: `$regex` (pattern matching with full regex support)
 - **Query optimizer**: Selects best execution strategy (index scan vs collection scan)
 - **Projection**: Field selection and exclusion
 

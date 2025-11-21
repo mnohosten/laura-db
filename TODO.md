@@ -139,7 +139,7 @@ LauraDB is a functional MongoDB-like document database with most core features i
 
 #### Query Enhancements
 - [ ] Text search with $text operator
-- [ ] Regular expression queries ($regex)
+- [x] **Regular expression queries ($regex)** ✨ NEW
 - [ ] Geospatial queries ($near, $geoWithin)
 - [x] **Array query operators ($elemMatch, $size)** ✨ NEW
 
@@ -147,8 +147,8 @@ LauraDB is a functional MongoDB-like document database with most core features i
 - [x] **$rename (rename fields)** ✨ NEW
 - [x] **$currentDate (set to current date)** ✨ NEW
 - [x] **$pullAll (remove multiple array values)** ✨ NEW
+- [x] **$each modifier for $push and $addToSet** ✨ NEW
 - [ ] $bit (bitwise operations)
-- [ ] $each modifier for $push and $addToSet
 
 #### Index Improvements
 - [ ] Compound indexes (multiple fields)
@@ -323,14 +323,14 @@ LauraDB is a functional MongoDB-like document database with most core features i
 
 ## 📊 Current Statistics
 
-- **Lines of Code**: ~9,000+ (Go)
-- **Test Files**: 17+
-- **Test Cases**: 95+
+- **Lines of Code**: ~10,000+ (Go)
+- **Test Files**: 19+
+- **Test Cases**: 116+
 - **Packages**: 9 core packages
 - **Examples**: 3 working examples
 - **HTTP Endpoints**: 15+
-- **Supported Query Operators**: 14+ (added $elemMatch, $size)
-- **Update Operators**: 13+ (added $rename, $currentDate, $pullAll)
+- **Supported Query Operators**: 15+ (added $elemMatch, $size, $regex)
+- **Update Operators**: 13+ (added $rename, $currentDate, $pullAll, $each modifier)
 - **Aggregation Stages**: 6
 
 ---
@@ -343,8 +343,10 @@ LauraDB is a functional MongoDB-like document database with most core features i
 - ✅ Added numeric update operators ($mul, $min, $max)
 - ✅ Added field update operators ($rename, $currentDate, $pullAll)
 - ✅ Added array query operators ($elemMatch, $size)
+- ✅ Added regex query operator ($regex) with comprehensive pattern support
+- ✅ Added $each modifier for bulk array operations ($push/$addToSet)
 - ✅ Fixed time.Time support in document value type system
-- ✅ Created comprehensive test suites for all new operators
+- ✅ Created comprehensive test suites for all new operators (116+ tests)
 - ✅ Added Makefile for easier building
 - ✅ Created BUILD.md, TESTING.md, and BENCHMARKS.md documentation
 - ✅ Established performance baselines (93K inserts/sec, 24K queries/sec)

@@ -282,18 +282,34 @@ func (c *Collection) applyUpdate(doc *document.Document, update map[string]inter
 				}
 			}
 		} else if key == "$push" {
-			// $push operator - add element to array
+			// $push operator - add element(s) to array
 			if pushMap, ok := value.(map[string]interface{}); ok {
 				for field, pushVal := range pushMap {
+					// Check if using $each modifier for bulk push
+					var valuesToPush []interface{}
+					if modifierMap, ok := pushVal.(map[string]interface{}); ok {
+						if eachValues, hasEach := modifierMap["$each"]; hasEach {
+							// $each modifier - push multiple values
+							if eachArray, ok := eachValues.([]interface{}); ok {
+								valuesToPush = eachArray
+							}
+						}
+					}
+
+					// If no $each modifier, push single value
+					if valuesToPush == nil {
+						valuesToPush = []interface{}{pushVal}
+					}
+
 					if currentVal, exists := doc.Get(field); exists {
 						// Field exists, append to array
 						if arr, ok := currentVal.([]interface{}); ok {
-							arr = append(arr, pushVal)
+							arr = append(arr, valuesToPush...)
 							doc.Set(field, arr)
 						}
 					} else {
 						// Field doesn't exist, create new array
-						doc.Set(field, []interface{}{pushVal})
+						doc.Set(field, valuesToPush)
 					}
 				}
 			}
@@ -315,27 +331,58 @@ func (c *Collection) applyUpdate(doc *document.Document, update map[string]inter
 				}
 			}
 		} else if key == "$addToSet" {
-			// $addToSet operator - add element only if not already in array
+			// $addToSet operator - add element(s) only if not already in array
 			if addMap, ok := value.(map[string]interface{}); ok {
 				for field, addVal := range addMap {
+					// Check if using $each modifier for bulk addToSet
+					var valuesToAdd []interface{}
+					if modifierMap, ok := addVal.(map[string]interface{}); ok {
+						if eachValues, hasEach := modifierMap["$each"]; hasEach {
+							// $each modifier - add multiple unique values
+							if eachArray, ok := eachValues.([]interface{}); ok {
+								valuesToAdd = eachArray
+							}
+						}
+					}
+
+					// If no $each modifier, add single value
+					if valuesToAdd == nil {
+						valuesToAdd = []interface{}{addVal}
+					}
+
 					if currentVal, exists := doc.Get(field); exists {
-						// Field exists, check if value already in array
+						// Field exists, check each value and add if not present
 						if arr, ok := currentVal.([]interface{}); ok {
+							for _, val := range valuesToAdd {
+								found := false
+								for _, elem := range arr {
+									if compareValues2(elem, val) {
+										found = true
+										break
+									}
+								}
+								if !found {
+									arr = append(arr, val)
+								}
+							}
+							doc.Set(field, arr)
+						}
+					} else {
+						// Field doesn't exist, create new array with unique values
+						uniqueVals := make([]interface{}, 0)
+						for _, val := range valuesToAdd {
 							found := false
-							for _, elem := range arr {
-								if compareValues2(elem, addVal) {
+							for _, existing := range uniqueVals {
+								if compareValues2(existing, val) {
 									found = true
 									break
 								}
 							}
 							if !found {
-								arr = append(arr, addVal)
-								doc.Set(field, arr)
+								uniqueVals = append(uniqueVals, val)
 							}
 						}
-					} else {
-						// Field doesn't exist, create new array
-						doc.Set(field, []interface{}{addVal})
+						doc.Set(field, uniqueVals)
 					}
 				}
 			}
