@@ -173,10 +173,13 @@ func newSortStage(spec interface{}) (*SortStage, error) {
 	sortFields := make([]query.SortField, 0)
 	for field, order := range sortSpec {
 		ascending := true
-		if orderInt, ok := order.(int); ok {
-			ascending = orderInt >= 0
-		} else if orderInt, ok := order.(int64); ok {
-			ascending = orderInt >= 0
+		switch v := order.(type) {
+		case int:
+			ascending = v >= 0
+		case int64:
+			ascending = v >= 0
+		case float64:
+			ascending = v >= 0
 		}
 
 		sortFields = append(sortFields, query.SortField{

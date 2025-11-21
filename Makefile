@@ -33,10 +33,44 @@ test-coverage:
 	@echo "Running tests with coverage..."
 	@go test -cover ./pkg/...
 
+# Generate coverage report
+coverage:
+	@echo "Generating coverage report..."
+	@go test ./pkg/... -coverprofile=coverage.out
+	@go tool cover -func=coverage.out
+	@echo ""
+	@echo "HTML report generated: coverage.html"
+	@go tool cover -html=coverage.out -o coverage.html
+
+# View coverage in browser
+coverage-html: coverage
+	@echo "Opening coverage report in browser..."
+	@which xdg-open > /dev/null && xdg-open coverage.html || open coverage.html || echo "Please open coverage.html manually"
+
 # Run integration tests
 test-integration:
 	@echo "Running integration tests..."
 	@go test -v ./pkg/server -run TestServerIntegration
+
+# Run benchmarks
+bench:
+	@echo "Running benchmarks..."
+	@go test -bench=. -benchmem ./pkg/database ./pkg/index
+
+# Run all benchmarks with detailed output
+bench-all:
+	@echo "Running all benchmarks..."
+	@go test -bench=. -benchmem -benchtime=3s ./pkg/...
+
+# Run specific benchmark
+bench-insert:
+	@go test -bench=BenchmarkInsert -benchmem ./pkg/database
+
+bench-find:
+	@go test -bench=BenchmarkFind -benchmem ./pkg/database
+
+bench-index:
+	@go test -bench=. -benchmem ./pkg/index
 
 # Clean build artifacts
 clean:
@@ -44,6 +78,8 @@ clean:
 	@rm -f laura
 	@rm -rf bin/
 	@rm -rf data/ test_data* laura_data/
+	@rm -f coverage.out coverage.html
+	@rm -f test-results.log handler-test-results.log
 	@echo "✓ Cleaned"
 
 # Install dependencies
@@ -81,8 +117,15 @@ help:
 	@echo "  make server       Build main server only"
 	@echo "  make examples     Build examples only"
 	@echo "  make test         Run tests"
-	@echo "  make test-coverage Run tests with coverage"
+	@echo "  make test-coverage Run tests with coverage summary"
+	@echo "  make coverage     Generate detailed coverage report"
+	@echo "  make coverage-html Generate and open HTML coverage report"
 	@echo "  make test-integration Run integration tests"
+	@echo "  make bench        Run performance benchmarks"
+	@echo "  make bench-all    Run all benchmarks with detailed output"
+	@echo "  make bench-insert Run insert benchmarks"
+	@echo "  make bench-find   Run find benchmarks"
+	@echo "  make bench-index  Run index benchmarks"
 	@echo "  make clean        Remove build artifacts"
 	@echo "  make deps         Install dependencies"
 	@echo "  make run          Build and run server"
