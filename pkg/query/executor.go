@@ -90,6 +90,11 @@ func (e *Executor) Execute(query *Query) ([]*document.Document, error) {
 
 // ExecuteWithPlan executes a query using a query plan (potentially using indexes)
 func (e *Executor) ExecuteWithPlan(query *Query, plan *QueryPlan) ([]*document.Document, error) {
+	// Check if this is a covered query (can be satisfied entirely from index)
+	if plan.IsCovered {
+		return e.executeCoveredQuery(query, plan)
+	}
+
 	var candidates []*document.Document
 
 	if plan.UseIndex && plan.Index != nil {
@@ -140,6 +145,125 @@ func (e *Executor) ExecuteWithPlan(query *Query, plan *QueryPlan) ([]*document.D
 	for i, doc := range results {
 		results[i] = query.ApplyProjection(doc)
 	}
+
+	return results, nil
+}
+
+// executeCoveredQuery executes a query entirely from index data without fetching documents
+func (e *Executor) executeCoveredQuery(query *Query, plan *QueryPlan) ([]*document.Document, error) {
+	var keys []interface{}
+	var values []interface{}
+
+	switch plan.ScanType {
+	case ScanTypeIndexExact:
+		// Exact match scan
+		searchKey := plan.ScanKey
+		// Convert int to int64 (documents store numbers as int64)
+		if v, ok := searchKey.(int); ok {
+			searchKey = int64(v)
+		}
+
+		value, exists := plan.Index.Search(searchKey)
+		if exists {
+			keys = []interface{}{searchKey}
+			values = []interface{}{value}
+		}
+
+	case ScanTypeIndexRange:
+		// Range scan - gets both keys and values
+		// Handle nil start/end (for unbounded ranges)
+		start := plan.ScanStart
+		end := plan.ScanEnd
+
+		// Convert int to int64 (documents store numbers as int64)
+		if v, ok := start.(int); ok {
+			start = int64(v)
+		}
+		if v, ok := end.(int); ok {
+			end = int64(v)
+		}
+
+		// Determine type from start value to ensure consistent types
+		if end == nil && start != nil {
+			// Use same type as start for the upper bound
+			switch start.(type) {
+			case int:
+				end = int(2147483647) // max int32
+			case int32:
+				end = int32(2147483647)
+			case int64:
+				end = int64(9223372036854775807)
+			case float64:
+				end = float64(1.7976931348623157e+308)
+			default:
+				end = int64(9223372036854775807)
+			}
+		}
+		if start == nil && end != nil {
+			// Use same type as end for the lower bound
+			switch end.(type) {
+			case int:
+				start = int(-2147483648)
+			case int32:
+				start = int32(-2147483648)
+			case int64:
+				start = int64(-9223372036854775808)
+			case float64:
+				start = float64(-1.7976931348623157e+308)
+			default:
+				start = int64(-9223372036854775808)
+			}
+		}
+
+		keys, values = plan.Index.RangeScan(start, end)
+
+	default:
+		// Should not happen for covered queries
+		return nil, fmt.Errorf("invalid scan type for covered query")
+	}
+
+	// Build documents from index data
+	results := make([]*document.Document, 0, len(keys))
+	projection := query.GetProjection()
+
+	for i := 0; i < len(keys) && i < len(values); i++ {
+		doc := document.NewDocument()
+
+		// Add _id if requested in projection (or if no specific projection given)
+		if projection == nil || projection["_id"] {
+			if idStr, ok := values[i].(string); ok {
+				doc.Set("_id", idStr)
+			}
+		}
+
+		// Add indexed field if requested in projection (or if no specific projection given)
+		if projection == nil || projection[plan.IndexedField] {
+			doc.Set(plan.IndexedField, keys[i])
+		}
+
+		results = append(results, doc)
+	}
+
+	// Sort results (using the same sorting logic)
+	if len(query.GetSort()) > 0 {
+		e.sortDocuments(results, query.GetSort())
+	}
+
+	// Apply skip
+	if query.GetSkip() > 0 {
+		if query.GetSkip() >= len(results) {
+			results = []*document.Document{}
+		} else {
+			results = results[query.GetSkip():]
+		}
+	}
+
+	// Apply limit
+	if query.GetLimit() > 0 && query.GetLimit() < len(results) {
+		results = results[:query.GetLimit()]
+	}
+
+	// Note: No need to apply projection since we only built the requested fields
 
 	return results, nil
 }

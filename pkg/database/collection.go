@@ -205,6 +205,9 @@ func (c *Collection) executeQuery(q *query.Query) ([]*document.Document, error) 
 	// Generate execution plan
 	plan := planner.Plan(q)
 
+	// Detect if query can be covered by index
+	planner.DetectCoveredQuery(plan, q.GetProjection())
+
 	// Create executor with document map for efficient lookups
 	executor := query.NewExecutorWithMap(c.documents)
 

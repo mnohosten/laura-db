@@ -241,3 +241,8 @@ func (q *Query) GetSkip() int {
 func (q *Query) GetSort() []SortField {
 	return q.sort
 }
+
+// GetProjection returns the projection
+func (q *Query) GetProjection() map[string]bool {
+	return q.projection
+}

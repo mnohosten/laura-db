@@ -15,6 +15,8 @@ type QueryPlan struct {
 	ScanEnd       interface{} // For range scans
 	EstimatedCost int
 	FilterSteps   []string // Fields that still need filtering after index scan
+	IsCovered     bool     // True if query can be satisfied entirely from index
+	IndexedField  string   // The field covered by the index
 }
 
 // ScanType represents the type of index scan
@@ -90,10 +92,11 @@ func (qp *QueryPlanner) analyzeIndexForFilter(indexName string, idx *index.Index
 // analyzeSingleFieldFilter analyzes a single field filter
 func (qp *QueryPlanner) analyzeSingleFieldFilter(indexName string, idx *index.Index, field string, value interface{}, fullFilter map[string]interface{}) *QueryPlan {
 	plan := &QueryPlan{
-		UseIndex:    true,
-		IndexName:   indexName,
-		Index:       idx,
-		FilterSteps: qp.getRemainingFilters(field, fullFilter),
+		UseIndex:     true,
+		IndexName:    indexName,
+		Index:        idx,
+		FilterSteps:  qp.getRemainingFilters(field, fullFilter),
+		IndexedField: idx.FieldPath(),
 	}
 
 	// Check if it's an operator expression
@@ -185,15 +188,52 @@ func (qp *QueryPlanner) getRemainingFilters(indexedField string, filter map[stri
 	return remaining
 }
 
+// DetectCoveredQuery checks if the query can be satisfied entirely from the index
+func (qp *QueryPlanner) DetectCoveredQuery(plan *QueryPlan, projection map[string]bool) {
+	// Query must use an index to be covered
+	if !plan.UseIndex {
+		plan.IsCovered = false
+		return
+	}
+
+	// If no projection specified, we need all fields (not covered)
+	if projection == nil || len(projection) == 0 {
+		plan.IsCovered = false
+		return
+	}
+
+	// Check if all requested fields are available from index
+	// Index provides: the indexed field and _id (from the index value)
+	for field, include := range projection {
+		if !include {
+			// Exclusion projection - not supported for covered queries yet
+			plan.IsCovered = false
+			return
+		}
+
+		// Check if field is available from index
+		if field != plan.IndexedField && field != "_id" {
+			// Field not available from index
+			plan.IsCovered = false
+			return
+		}
+	}
+
+	// All projected fields are available from index!
+	plan.IsCovered = true
+}
+
 // Explain returns a human-readable explanation of the query plan
 func (plan *QueryPlan) Explain() map[string]interface{} {
 	result := map[string]interface{}{
 		"estimatedCost": plan.EstimatedCost,
 		"useIndex":      plan.UseIndex,
+		"isCovered":     plan.IsCovered,
 	}
 
 	if plan.UseIndex {
 		result["indexName"] = plan.IndexName
+		result["indexedField"] = plan.IndexedField
 
 		switch plan.ScanType {
 		case ScanTypeIndexExact:
@@ -213,6 +253,10 @@ func (plan *QueryPlan) Explain() map[string]interface{} {
 
 		if len(plan.FilterSteps) > 0 {
 			result["additionalFilters"] = plan.FilterSteps
+		}
+
+		if plan.IsCovered {
+			result["note"] = "Query can be satisfied entirely from index (covered query)"
 		}
 	} else {
 		result["scanType"] = "COLLECTION_SCAN"
