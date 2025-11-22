@@ -5,6 +5,7 @@ import (
 	"sort"
 
 	"github.com/mnohosten/laura-db/pkg/document"
+	"github.com/mnohosten/laura-db/pkg/index"
 )
 
 // Executor executes queries against a collection of documents
@@ -215,7 +216,24 @@ func (e *Executor) executeCoveredQuery(query *Query, plan *QueryPlan) ([]*docume
 			}
 		}
 
-		keys, values = plan.Index.RangeScan(start, end)
+		allKeys, allValues := plan.Index.RangeScan(start, end)
+
+		// If this is a prefix match on compound index, filter by prefix
+		if plan.PrefixKey != nil {
+			keys = make([]interface{}, 0)
+			values = make([]interface{}, 0)
+			for i, key := range allKeys {
+				if compositeKey, ok := key.(*index.CompositeKey); ok {
+					if compositeKey.MatchesPrefix(plan.PrefixKey) {
+						keys = append(keys, key)
+						values = append(values, allValues[i])
+					}
+				}
+			}
+		} else {
+			keys = allKeys
+			values = allValues
+		}
 
 	default:
 		// Should not happen for covered queries
@@ -284,11 +302,26 @@ func (e *Executor) executeIndexScan(plan *QueryPlan) ([]*document.Document, erro
 
 	case ScanTypeIndexRange:
 		// Range scan
-		_, values := plan.Index.RangeScan(plan.ScanStart, plan.ScanEnd)
+		keys, values := plan.Index.RangeScan(plan.ScanStart, plan.ScanEnd)
 		docIDs = make([]string, 0, len(values))
-		for _, v := range values {
-			if idStr, ok := v.(string); ok {
-				docIDs = append(docIDs, idStr)
+
+		// If this is a prefix match on compound index, filter by prefix
+		if plan.PrefixKey != nil {
+			for i, key := range keys {
+				if compositeKey, ok := key.(*index.CompositeKey); ok {
+					if compositeKey.MatchesPrefix(plan.PrefixKey) {
+						if idStr, ok := values[i].(string); ok {
+							docIDs = append(docIDs, idStr)
+						}
+					}
+				}
+			}
+		} else {
+			// Normal range scan without prefix filtering
+			for _, v := range values {
+				if idStr, ok := v.(string); ok {
+					docIDs = append(docIDs, idStr)
+				}
 			}
 		}
 

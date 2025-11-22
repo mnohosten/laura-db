@@ -449,36 +449,65 @@ results, _ := coll.FindWithOptions(
 
 ## Performance Considerations
 
-### Collection Scan
+### Query Planning with Statistics
 
-Currently, all queries perform collection scans:
-1. Read all documents
-2. Filter each document
-3. Return matches
+The query planner uses index statistics to choose the most efficient execution strategy:
 
-**Time complexity**: O(n) where n = total documents
+1. **Statistics Collection**: Indexes track cardinality, selectivity, and value distribution
+2. **Cost Estimation**: Each potential index is assigned an estimated query cost
+3. **Plan Selection**: The planner chooses the index with the lowest estimated cost
+4. **Execution**: Query executes using the selected index (or collection scan if no suitable index)
 
-### Index Usage (Future Enhancement)
+**Time complexity**:
+- With index: O(log n + k) where k = matching documents
+- Without index: O(n) where n = total documents
 
-With index integration:
-1. Check if query can use index
-2. Use index to find matching documents
-3. Return results
+### Statistics-Based Optimization
 
-**Time complexity**: O(log n + k) where k = matching documents
+```go
+// Create indexes
+coll.CreateIndex("email", true)   // High cardinality
+coll.CreateIndex("status", false) // Low cardinality
+
+// Analyze to collect statistics
+coll.Analyze()
+
+// Query that could use either index
+results, _ := coll.Find(map[string]interface{}{
+    "email": "alice@example.com",
+    "status": "active",
+})
+
+// Planner automatically chooses email index
+// (higher cardinality = more selective = lower cost)
+```
+
+**Explain Query Plans:**
+
+```go
+plan := planner.Plan(query)
+explanation := plan.Explain()
+
+fmt.Printf("Using Index: %v\n", explanation["useIndex"])
+fmt.Printf("Index Name: %v\n", explanation["indexName"])
+fmt.Printf("Scan Type: %v\n", explanation["scanType"])
+fmt.Printf("Estimated Cost: %v\n", explanation["estimatedCost"])
+fmt.Printf("Is Covered: %v\n", explanation["isCovered"])
+```
 
 ### Optimization Tips
 
-**Current implementation**:
-- Create indexes on frequently-queried fields (prepared for future integration)
+**Best practices**:
+- Run `Analyze()` periodically to keep statistics fresh
+- Create indexes on high-cardinality fields (many unique values)
 - Use projections to reduce data transfer
 - Use limits to cap result size
-- Add early exit conditions in filters
+- Check query plans with `Explain()` to verify index usage
 
 **Future optimizations**:
 - Index intersection (use multiple indexes)
 - Query plan caching
-- Statistics-based optimization
+- Histogram-based selectivity estimation
 
 ## Query API
 
@@ -644,13 +673,12 @@ coll.FindWithOptions(filter, &QueryOptions{
 
 ## Future Enhancements
 
-1. **Index integration**: Use indexes in query execution
-2. **Query optimizer**: Choose best execution plan
-3. **Nested field queries**: Support dot notation (user.address.city)
-4. **Array operators**: $all, $elemMatch
-5. **Query plan caching**: Reuse execution plans
-6. **Parallel query execution**: Multi-threaded filtering
-7. **Query hints**: Let users specify index to use
+1. **Nested field queries**: Support dot notation (user.address.city)
+2. **More array operators**: $all (already have $elemMatch)
+3. **Query plan caching**: Reuse execution plans for identical queries
+4. **Parallel query execution**: Multi-threaded filtering for large collections
+5. **Query hints**: Let users specify which index to use
+6. **Histogram-based selectivity**: More accurate cardinality estimation for range queries
 
 ## Summary
 

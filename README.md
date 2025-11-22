@@ -43,7 +43,10 @@ This project demonstrates how to build a production-grade document database from
   - Array: `$in`, `$nin`, `$all`, `$elemMatch`, `$size`
   - Element: `$exists`, `$type`
   - Evaluation: `$regex` (pattern matching with full regex support)
-- **Query optimizer**: Selects best execution strategy (index scan vs collection scan)
+- **Query optimizer**: Cost-based optimization using index statistics
+  - Statistics tracking: Cardinality, selectivity, min/max values
+  - Intelligent index selection: Chooses best index based on query cost estimation
+  - Covered query detection: Query satisfied entirely from index
 - **Projection**: Field selection and exclusion
 
 #### 6. Query Cache (`pkg/cache`)

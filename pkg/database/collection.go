@@ -8,6 +8,7 @@ import (
 	"github.com/mnohosten/laura-db/pkg/aggregation"
 	"github.com/mnohosten/laura-db/pkg/cache"
 	"github.com/mnohosten/laura-db/pkg/document"
+	"github.com/mnohosten/laura-db/pkg/geo"
 	"github.com/mnohosten/laura-db/pkg/index"
 	"github.com/mnohosten/laura-db/pkg/mvcc"
 	"github.com/mnohosten/laura-db/pkg/query"
@@ -15,22 +16,28 @@ import (
 
 // Collection represents a collection of documents
 type Collection struct {
-	name       string
-	documents  map[string]*document.Document // _id -> document
-	indexes    map[string]*index.Index       // index name -> index
-	txnMgr     *mvcc.TransactionManager
-	queryCache *cache.LRUCache               // Query result cache
-	mu         sync.RWMutex
+	name        string
+	documents   map[string]*document.Document // _id -> document
+	indexes     map[string]*index.Index       // index name -> index
+	textIndexes map[string]*index.TextIndex   // text index name -> text index
+	geoIndexes  map[string]*index.GeoIndex    // geo index name -> geo index
+	ttlIndexes  map[string]*index.TTLIndex    // ttl index name -> ttl index
+	txnMgr      *mvcc.TransactionManager
+	queryCache  *cache.LRUCache               // Query result cache
+	mu          sync.RWMutex
 }
 
 // NewCollection creates a new collection
 func NewCollection(name string, txnMgr *mvcc.TransactionManager) *Collection {
 	coll := &Collection{
-		name:       name,
-		documents:  make(map[string]*document.Document),
-		indexes:    make(map[string]*index.Index),
-		txnMgr:     txnMgr,
-		queryCache: cache.NewLRUCache(1000, 5*time.Minute), // 1000 queries, 5min TTL
+		name:        name,
+		documents:   make(map[string]*document.Document),
+		indexes:     make(map[string]*index.Index),
+		textIndexes: make(map[string]*index.TextIndex),
+		geoIndexes:  make(map[string]*index.GeoIndex),
+		ttlIndexes:  make(map[string]*index.TTLIndex),
+		txnMgr:      txnMgr,
+		queryCache:  cache.NewLRUCache(1000, 5*time.Minute), // 1000 queries, 5min TTL
 	}
 
 	// Create default index on _id
@@ -71,13 +78,78 @@ func (c *Collection) InsertOne(doc map[string]interface{}) (string, error) {
 
 	// Insert into indexes
 	for _, idx := range c.indexes {
-		fieldValue, exists := d.Get(idx.FieldPath())
-		if !exists && idx.IsUnique() {
-			continue // Skip missing fields for unique indexes
+		// Check if document matches partial index filter
+		if !c.matchesPartialIndexFilter(d, idx) {
+			continue // Skip this index if document doesn't match filter
 		}
-		if exists {
-			if err := idx.Insert(fieldValue, id); err != nil {
-				return "", fmt.Errorf("failed to insert into index %s: %w", idx.Name(), err)
+
+		if idx.IsCompound() {
+			// Compound index
+			if compositeKey, allFieldsExist := c.extractCompositeKey(d, idx.FieldPaths()); allFieldsExist {
+				if err := idx.Insert(compositeKey, id); err != nil {
+					return "", fmt.Errorf("failed to insert into compound index %s: %w", idx.Name(), err)
+				}
+			} else if !idx.IsUnique() {
+				// For non-unique indexes, we could still insert partial keys,
+				// but for now we skip documents with missing fields
+				continue
+			}
+		} else {
+			// Single-field index
+			fieldValue, exists := d.Get(idx.FieldPath())
+			if !exists && idx.IsUnique() {
+				continue // Skip missing fields for unique indexes
+			}
+			if exists {
+				if err := idx.Insert(fieldValue, id); err != nil {
+					return "", fmt.Errorf("failed to insert into index %s: %w", idx.Name(), err)
+				}
+			}
+		}
+	}
+
+	// Insert into text indexes
+	for _, textIdx := range c.textIndexes {
+		texts := make([]string, 0, len(textIdx.FieldPaths()))
+		for _, fieldPath := range textIdx.FieldPaths() {
+			if fieldValue, exists := d.Get(fieldPath); exists {
+				if str, ok := fieldValue.(string); ok {
+					texts = append(texts, str)
+				}
+			}
+		}
+		if len(texts) > 0 {
+			textIdx.Index(id, texts)
+		}
+	}
+
+	// Insert into geo indexes
+	for _, geoIdx := range c.geoIndexes {
+		if fieldValue, exists := d.Get(geoIdx.FieldPath()); exists {
+			if pointMap, ok := fieldValue.(map[string]interface{}); ok {
+				if point, err := geo.ParseGeoJSONPoint(pointMap); err == nil {
+					geoIdx.Index(id, point)
+				}
+			}
+		}
+	}
+
+	// Insert into TTL indexes
+	for _, ttlIdx := range c.ttlIndexes {
+		if fieldValue, exists := d.Get(ttlIdx.FieldPath()); exists {
+			var timestamp time.Time
+			switch v := fieldValue.(type) {
+			case time.Time:
+				timestamp = v
+			case string:
+				if t, err := time.Parse(time.RFC3339, v); err == nil {
+					timestamp = t
+				}
+			case int64:
+				timestamp = time.Unix(v, 0)
+			}
+			if !timestamp.IsZero() {
+				ttlIdx.Index(id, timestamp)
 			}
 		}
 	}
@@ -226,9 +298,115 @@ func (c *Collection) UpdateOne(filter map[string]interface{}, update map[string]
 		return err
 	}
 
+	// Get document ID for index updates
+	idVal, _ := doc.Get("_id")
+	id := fmt.Sprintf("%v", idVal)
+
+	// Remove old index entries before update
+	for _, idx := range c.indexes {
+		if idx.IsCompound() {
+			// Compound index
+			if compositeKey, allFieldsExist := c.extractCompositeKey(doc, idx.FieldPaths()); allFieldsExist {
+				idx.Delete(compositeKey)
+			}
+		} else {
+			// Single-field index
+			if fieldValue, exists := doc.Get(idx.FieldPath()); exists {
+				idx.Delete(fieldValue)
+			}
+		}
+	}
+
+	// Remove from text indexes before update
+	for _, textIdx := range c.textIndexes {
+		textIdx.Remove(id)
+	}
+
+	// Remove from geo indexes before update
+	for _, geoIdx := range c.geoIndexes {
+		geoIdx.Remove(id)
+	}
+
+	// Remove from TTL indexes before update
+	for _, ttlIdx := range c.ttlIndexes {
+		ttlIdx.Remove(id)
+	}
+
 	// Apply update
 	if err := c.applyUpdate(doc, update); err != nil {
 		return err
+	}
+
+	// Add new index entries after update
+	for _, idx := range c.indexes {
+		// Check if document matches partial index filter
+		if !c.matchesPartialIndexFilter(doc, idx) {
+			continue // Skip this index if document doesn't match filter
+		}
+
+		if idx.IsCompound() {
+			// Compound index
+			if compositeKey, allFieldsExist := c.extractCompositeKey(doc, idx.FieldPaths()); allFieldsExist {
+				if err := idx.Insert(compositeKey, id); err != nil {
+					// Log error but continue - index might have duplicate
+					continue
+				}
+			}
+		} else {
+			// Single-field index
+			if fieldValue, exists := doc.Get(idx.FieldPath()); exists {
+				if err := idx.Insert(fieldValue, id); err != nil {
+					// Log error but continue - index might have duplicate
+					continue
+				}
+			}
+		}
+	}
+
+	// Re-index in text indexes after update
+	for _, textIdx := range c.textIndexes {
+		texts := make([]string, 0, len(textIdx.FieldPaths()))
+		for _, fieldPath := range textIdx.FieldPaths() {
+			if fieldValue, exists := doc.Get(fieldPath); exists {
+				if str, ok := fieldValue.(string); ok {
+					texts = append(texts, str)
+				}
+			}
+		}
+		if len(texts) > 0 {
+			textIdx.Index(id, texts)
+		}
+	}
+
+	// Re-index in geo indexes after update
+	for _, geoIdx := range c.geoIndexes {
+		if fieldValue, exists := doc.Get(geoIdx.FieldPath()); exists {
+			if pointMap, ok := fieldValue.(map[string]interface{}); ok {
+				if point, err := geo.ParseGeoJSONPoint(pointMap); err == nil {
+					geoIdx.Index(id, point)
+				}
+			}
+		}
+	}
+
+	// Re-index in TTL indexes after update
+	for _, ttlIdx := range c.ttlIndexes {
+		if fieldValue, exists := doc.Get(ttlIdx.FieldPath()); exists {
+			var timestamp time.Time
+			switch v := fieldValue.(type) {
+			case time.Time:
+				timestamp = v
+			case string:
+				if t, err := time.Parse(time.RFC3339, v); err == nil {
+					timestamp = t
+				}
+			case int64:
+				timestamp = time.Unix(v, 0)
+			}
+			if !timestamp.IsZero() {
+				ttlIdx.Index(id, timestamp)
+			}
+		}
 	}
 
 	// Invalidate query cache on write
@@ -251,9 +429,117 @@ func (c *Collection) UpdateMany(filter map[string]interface{}, update map[string
 	// Update each document
 	count := 0
 	for _, doc := range docs {
+		// Get document ID for index updates
+		idVal, _ := doc.Get("_id")
+		id := fmt.Sprintf("%v", idVal)
+
+		// Remove old index entries before update
+		for _, idx := range c.indexes {
+			if idx.IsCompound() {
+				// Compound index
+				if compositeKey, allFieldsExist := c.extractCompositeKey(doc, idx.FieldPaths()); allFieldsExist {
+					idx.Delete(compositeKey)
+				}
+			} else {
+				// Single-field index
+				if fieldValue, exists := doc.Get(idx.FieldPath()); exists {
+					idx.Delete(fieldValue)
+				}
+			}
+		}
+
+		// Remove from text indexes before update
+		for _, textIdx := range c.textIndexes {
+			textIdx.Remove(id)
+		}
+
+		// Remove from geo indexes before update
+		for _, geoIdx := range c.geoIndexes {
+			geoIdx.Remove(id)
+		}
+
+		// Remove from TTL indexes before update
+		for _, ttlIdx := range c.ttlIndexes {
+			ttlIdx.Remove(id)
+		}
+
+		// Apply update
 		if err := c.applyUpdate(doc, update); err != nil {
 			return count, err
 		}
+
+		// Add new index entries after update
+		for _, idx := range c.indexes {
+			// Check if document matches partial index filter
+			if !c.matchesPartialIndexFilter(doc, idx) {
+				continue // Skip this index if document doesn't match filter
+			}
+
+			if idx.IsCompound() {
+				// Compound index
+				if compositeKey, allFieldsExist := c.extractCompositeKey(doc, idx.FieldPaths()); allFieldsExist {
+					if err := idx.Insert(compositeKey, id); err != nil {
+						// Log error but continue - index might have duplicate
+						continue
+					}
+				}
+			} else {
+				// Single-field index
+				if fieldValue, exists := doc.Get(idx.FieldPath()); exists {
+					if err := idx.Insert(fieldValue, id); err != nil {
+						// Log error but continue - index might have duplicate
+						continue
+					}
+				}
+			}
+		}
+
+		// Re-index in text indexes after update
+		for _, textIdx := range c.textIndexes {
+			texts := make([]string, 0, len(textIdx.FieldPaths()))
+			for _, fieldPath := range textIdx.FieldPaths() {
+				if fieldValue, exists := doc.Get(fieldPath); exists {
+					if str, ok := fieldValue.(string); ok {
+						texts = append(texts, str)
+					}
+				}
+			}
+			if len(texts) > 0 {
+				textIdx.Index(id, texts)
+			}
+		}
+
+		// Re-index in geo indexes after update
+		for _, geoIdx := range c.geoIndexes {
+			if fieldValue, exists := doc.Get(geoIdx.FieldPath()); exists {
+				if pointMap, ok := fieldValue.(map[string]interface{}); ok {
+					if point, err := geo.ParseGeoJSONPoint(pointMap); err == nil {
+						geoIdx.Index(id, point)
+					}
+				}
+			}
+		}
+
+		// Re-index in TTL indexes after update
+		for _, ttlIdx := range c.ttlIndexes {
+			if fieldValue, exists := doc.Get(ttlIdx.FieldPath()); exists {
+				var timestamp time.Time
+				switch v := fieldValue.(type) {
+				case time.Time:
+					timestamp = v
+				case string:
+					if t, err := time.Parse(time.RFC3339, v); err == nil {
+						timestamp = t
+					}
+				case int64:
+					timestamp = time.Unix(v, 0)
+				}
+				if !timestamp.IsZero() {
+					ttlIdx.Index(id, timestamp)
+				}
+			}
+		}
+
 		count++
 	}
 
@@ -566,9 +852,32 @@ func (c *Collection) DeleteOne(filter map[string]interface{}) error {
 
 	// Remove from indexes
 	for _, idx := range c.indexes {
-		if fieldValue, exists := doc.Get(idx.FieldPath()); exists {
-			idx.Delete(fieldValue)
+		if idx.IsCompound() {
+			// Compound index
+			if compositeKey, allFieldsExist := c.extractCompositeKey(doc, idx.FieldPaths()); allFieldsExist {
+				idx.Delete(compositeKey)
+			}
+		} else {
+			// Single-field index
+			if fieldValue, exists := doc.Get(idx.FieldPath()); exists {
+				idx.Delete(fieldValue)
+			}
 		}
+	}
+
+	// Remove from text indexes
+	for _, textIdx := range c.textIndexes {
+		textIdx.Remove(id)
+	}
+
+	// Remove from geo indexes
+	for _, geoIdx := range c.geoIndexes {
+		geoIdx.Remove(id)
+	}
+
+	// Remove from TTL indexes
+	for _, ttlIdx := range c.ttlIndexes {
+		ttlIdx.Remove(id)
 	}
 
 	// Delete document
@@ -597,9 +906,32 @@ func (c *Collection) DeleteMany(filter map[string]interface{}) (int, error) {
 
 		// Remove from indexes
 		for _, idx := range c.indexes {
-			if fieldValue, exists := doc.Get(idx.FieldPath()); exists {
-				idx.Delete(fieldValue)
+			if idx.IsCompound() {
+				// Compound index
+				if compositeKey, allFieldsExist := c.extractCompositeKey(doc, idx.FieldPaths()); allFieldsExist {
+					idx.Delete(compositeKey)
+				}
+			} else {
+				// Single-field index
+				if fieldValue, exists := doc.Get(idx.FieldPath()); exists {
+					idx.Delete(fieldValue)
+				}
 			}
+		}
+
+		// Remove from text indexes
+		for _, textIdx := range c.textIndexes {
+			textIdx.Remove(id)
+		}
+
+		// Remove from geo indexes
+		for _, geoIdx := range c.geoIndexes {
+			geoIdx.Remove(id)
+		}
+
+		// Remove from TTL indexes
+		for _, ttlIdx := range c.ttlIndexes {
+			ttlIdx.Remove(id)
 		}
 
 		delete(c.documents, id)
@@ -619,6 +951,37 @@ func (c *Collection) Count(filter map[string]interface{}) (int, error) {
 
 	docs, err := c.findInternal(filter)
 	return len(docs), err
+}
+
+// extractCompositeKey extracts values for a compound index from a document
+// Returns the composite key and a boolean indicating if all fields were present
+func (c *Collection) extractCompositeKey(d *document.Document, fieldPaths []string) (*index.CompositeKey, bool) {
+	values := make([]interface{}, 0, len(fieldPaths))
+	for _, fieldPath := range fieldPaths {
+		if fieldValue, exists := d.Get(fieldPath); exists {
+			values = append(values, fieldValue)
+		} else {
+			return nil, false
+		}
+	}
+	return index.NewCompositeKey(values...), true
+}
+
+// matchesPartialIndexFilter checks if a document matches a partial index filter
+// Returns true if index has no filter (full index) or document matches the filter
+func (c *Collection) matchesPartialIndexFilter(d *document.Document, idx *index.Index) bool {
+	if !idx.IsPartial() {
+		return true // Full index - all documents match
+	}
+
+	// Create query from filter and check if document matches
+	q := query.NewQuery(idx.Filter())
+	matches, err := q.Matches(d)
+	if err != nil {
+		// On error, don't index the document
+		return false
+	}
+	return matches
 }
 
 // CreateIndex creates an index on a field
@@ -652,7 +1015,261 @@ func (c *Collection) CreateIndex(fieldPath string, unique bool) error {
 	return nil
 }
 
-// DropIndex drops an index
+// CreateCompoundIndex creates a compound index on multiple fields
+func (c *Collection) CreateCompoundIndex(fieldPaths []string, unique bool) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if len(fieldPaths) == 0 {
+		return fmt.Errorf("compound index must have at least one field")
+	}
+
+	// Generate index name: field1_field2_..._1
+	indexName := ""
+	for i, field := range fieldPaths {
+		if i > 0 {
+			indexName += "_"
+		}
+		indexName += field
+	}
+	indexName += "_1"
+
+	if _, exists := c.indexes[indexName]; exists {
+		return fmt.Errorf("index %s already exists", indexName)
+	}
+
+	idx := index.NewIndex(&index.IndexConfig{
+		Name:       indexName,
+		FieldPaths: fieldPaths,
+		Type:       index.IndexTypeBTree,
+		Unique:     unique,
+		Order:      32,
+	})
+
+	// Build index from existing documents
+	for id, doc := range c.documents {
+		// Extract all field values for the composite key
+		values := make([]interface{}, 0, len(fieldPaths))
+		allFieldsExist := true
+
+		for _, fieldPath := range fieldPaths {
+			if fieldValue, exists := doc.Get(fieldPath); exists {
+				values = append(values, fieldValue)
+			} else {
+				// If any field is missing, skip this document
+				allFieldsExist = false
+				break
+			}
+		}
+
+		if allFieldsExist {
+			compositeKey := index.NewCompositeKey(values...)
+			if err := idx.Insert(compositeKey, id); err != nil {
+				return fmt.Errorf("failed to build compound index: %w", err)
+			}
+		}
+	}
+
+	c.indexes[indexName] = idx
+	return nil
+}
+
+// CreatePartialIndex creates a partial index that only indexes documents matching a filter
+func (c *Collection) CreatePartialIndex(fieldPath string, filter map[string]interface{}, unique bool) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if len(filter) == 0 {
+		return fmt.Errorf("partial index must have a filter expression")
+	}
+
+	// Generate index name: fieldPath_partial
+	indexName := fieldPath + "_partial"
+
+	if _, exists := c.indexes[indexName]; exists {
+		return fmt.Errorf("index %s already exists", indexName)
+	}
+
+	idx := index.NewIndex(&index.IndexConfig{
+		Name:      indexName,
+		FieldPath: fieldPath,
+		Type:      index.IndexTypeBTree,
+		Unique:    unique,
+		Order:     32,
+		Filter:    filter,
+	})
+
+	// Build index from existing documents that match the filter
+	for id, doc := range c.documents {
+		// Check if document matches the filter
+		if c.matchesPartialIndexFilter(doc, idx) {
+			// Get field value and insert into index
+			if fieldValue, exists := doc.Get(fieldPath); exists {
+				if err := idx.Insert(fieldValue, id); err != nil {
+					return fmt.Errorf("failed to build partial index: %w", err)
+				}
+			}
+		}
+	}
+
+	c.indexes[indexName] = idx
+	return nil
+}
+
+// CreateTextIndex creates a text search index on one or more text fields
+func (c *Collection) CreateTextIndex(fieldPaths []string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if len(fieldPaths) == 0 {
+		return fmt.Errorf("text index must have at least one field")
+	}
+
+	// Generate index name: field1_field2_..._text
+	indexName := ""
+	for i, field := range fieldPaths {
+		if i > 0 {
+			indexName += "_"
+		}
+		indexName += field
+	}
+	indexName += "_text"
+
+	if _, exists := c.textIndexes[indexName]; exists {
+		return fmt.Errorf("text index %s already exists", indexName)
+	}
+
+	// Create text index
+	textIdx := index.NewTextIndex(indexName, fieldPaths)
+
+	// Build index from existing documents
+	for id, doc := range c.documents {
+		// Extract all text field values
+		texts := make([]string, 0, len(fieldPaths))
+
+		for _, fieldPath := range fieldPaths {
+			if fieldValue, exists := doc.Get(fieldPath); exists {
+				// Convert value to string
+				if str, ok := fieldValue.(string); ok {
+					texts = append(texts, str)
+				}
+			}
+		}
+
+		// Only index if we found at least one text field
+		if len(texts) > 0 {
+			textIdx.Index(id, texts)
+		}
+	}
+
+	c.textIndexes[indexName] = textIdx
+	return nil
+}
+
+// Create2DIndex creates a 2d planar geospatial index on a field
+func (c *Collection) Create2DIndex(fieldPath string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	indexName := fieldPath + "_2d"
+
+	if _, exists := c.geoIndexes[indexName]; exists {
+		return fmt.Errorf("2d index %s already exists", indexName)
+	}
+
+	// Create 2d index
+	geoIdx := index.NewGeoIndex(indexName, fieldPath, index.IndexType2D)
+
+	// Build index from existing documents
+	for id, doc := range c.documents {
+		if fieldValue, exists := doc.Get(fieldPath); exists {
+			// Try to parse as GeoJSON point
+			if pointMap, ok := fieldValue.(map[string]interface{}); ok {
+				if point, err := geo.ParseGeoJSONPoint(pointMap); err == nil {
+					geoIdx.Index(id, point)
+				}
+			}
+		}
+	}
+
+	c.geoIndexes[indexName] = geoIdx
+	return nil
+}
+
+// Create2DSphereIndex creates a 2dsphere spherical geospatial index on a field
+func (c *Collection) Create2DSphereIndex(fieldPath string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	indexName := fieldPath + "_2dsphere"
+
+	if _, exists := c.geoIndexes[indexName]; exists {
+		return fmt.Errorf("2dsphere index %s already exists", indexName)
+	}
+
+	// Create 2dsphere index
+	geoIdx := index.NewGeoIndex(indexName, fieldPath, index.IndexType2DSphere)
+
+	// Build index from existing documents
+	for id, doc := range c.documents {
+		if fieldValue, exists := doc.Get(fieldPath); exists {
+			// Try to parse as GeoJSON point
+			if pointMap, ok := fieldValue.(map[string]interface{}); ok {
+				if point, err := geo.ParseGeoJSONPoint(pointMap); err == nil {
+					geoIdx.Index(id, point)
+				}
+			}
+		}
+	}
+
+	c.geoIndexes[indexName] = geoIdx
+	return nil
+}
+
+// CreateTTLIndex creates a TTL (time-to-live) index on a date field
+// Documents will be automatically deleted ttlSeconds after the timestamp in the field
+func (c *Collection) CreateTTLIndex(fieldPath string, ttlSeconds int64) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	indexName := fieldPath + "_ttl"
+
+	if _, exists := c.ttlIndexes[indexName]; exists {
+		return fmt.Errorf("ttl index %s already exists", indexName)
+	}
+
+	// Create TTL index
+	ttlIdx := index.NewTTLIndex(indexName, fieldPath, ttlSeconds)
+
+	// Build index from existing documents
+	for id, doc := range c.documents {
+		if fieldValue, exists := doc.Get(fieldPath); exists {
+			// Try to convert to time.Time
+			var timestamp time.Time
+			switch v := fieldValue.(type) {
+			case time.Time:
+				timestamp = v
+			case string:
+				// Try to parse as RFC3339 string
+				if t, err := time.Parse(time.RFC3339, v); err == nil {
+					timestamp = t
+				}
+			case int64:
+				// Unix timestamp in seconds
+				timestamp = time.Unix(v, 0)
+			default:
+				continue // Skip non-time values
+			}
+
+			ttlIdx.Index(id, timestamp)
+		}
+	}
+
+	c.ttlIndexes[indexName] = ttlIdx
+	return nil
+}
+
+// DropIndex drops an index (B+ tree, compound, text, geo, or ttl)
 func (c *Collection) DropIndex(indexName string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -661,23 +1278,66 @@ func (c *Collection) DropIndex(indexName string) error {
 		return fmt.Errorf("cannot drop _id index")
 	}
 
-	if _, exists := c.indexes[indexName]; !exists {
-		return fmt.Errorf("index %s does not exist", indexName)
+	// Check if it's a regular index
+	if _, exists := c.indexes[indexName]; exists {
+		delete(c.indexes, indexName)
+		return nil
 	}
 
-	delete(c.indexes, indexName)
-	return nil
+	// Check if it's a text index
+	if _, exists := c.textIndexes[indexName]; exists {
+		delete(c.textIndexes, indexName)
+		return nil
+	}
+
+	// Check if it's a geo index
+	if _, exists := c.geoIndexes[indexName]; exists {
+		delete(c.geoIndexes, indexName)
+		return nil
+	}
+
+	// Check if it's a TTL index
+	if _, exists := c.ttlIndexes[indexName]; exists {
+		delete(c.ttlIndexes, indexName)
+		return nil
+	}
+
+	return fmt.Errorf("index %s does not exist", indexName)
 }
 
-// ListIndexes returns all indexes
+// ListIndexes returns all indexes (B+ tree, compound, text, geo, and ttl)
 func (c *Collection) ListIndexes() []map[string]interface{} {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	indexes := make([]map[string]interface{}, 0, len(c.indexes))
+	indexes := make([]map[string]interface{}, 0, len(c.indexes)+len(c.textIndexes)+len(c.geoIndexes)+len(c.ttlIndexes))
+
+	// Add regular indexes
 	for _, idx := range c.indexes {
 		indexes = append(indexes, idx.Stats())
 	}
+
+	// Add text indexes
+	for _, textIdx := range c.textIndexes {
+		indexes = append(indexes, textIdx.Stats())
+	}
+
+	// Add geo indexes
+	for _, geoIdx := range c.geoIndexes {
+		indexes = append(indexes, geoIdx.Stats())
+	}
+
+	// Add TTL indexes
+	for _, ttlIdx := range c.ttlIndexes {
+		indexes = append(indexes, map[string]interface{}{
+			"name":       ttlIdx.Name(),
+			"field":      ttlIdx.FieldPath(),
+			"type":       "ttl",
+			"ttlSeconds": ttlIdx.TTLSeconds(),
+			"count":      ttlIdx.Count(),
+		})
+	}
+
 	return indexes
 }
 
@@ -717,6 +1377,100 @@ func (c *Collection) Stats() map[string]interface{} {
 		"indexes":       len(c.indexes),
 		"index_details": c.ListIndexes(),
 	}
+}
+
+// Analyze recalculates statistics for all indexes in the collection
+func (c *Collection) Analyze() {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	for _, idx := range c.indexes {
+		idx.Analyze()
+	}
+
+	for _, textIdx := range c.textIndexes {
+		textIdx.Analyze()
+	}
+}
+
+// TextSearch performs a text search using text indexes
+// Returns documents sorted by relevance score (highest first)
+func (c *Collection) TextSearch(searchText string, options *QueryOptions) ([]*document.Document, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if len(c.textIndexes) == 0 {
+		return nil, fmt.Errorf("no text index available for text search")
+	}
+
+	// Use the first text index (in practice, we'd select based on fields)
+	var textIdx *index.TextIndex
+	for _, idx := range c.textIndexes {
+		textIdx = idx
+		break
+	}
+
+	// Search the text index
+	results := textIdx.Search(searchText)
+
+	// Convert results to documents
+	docs := make([]*document.Document, 0, len(results))
+	for _, result := range results {
+		if doc, exists := c.documents[result.DocID]; exists {
+			// Add relevance score as a metadata field
+			docCopy := document.NewDocumentFromMap(doc.ToMap())
+			docCopy.Set("_textScore", result.Score)
+			docs = append(docs, docCopy)
+		}
+	}
+
+	// Apply projection if specified
+	if options != nil && options.Projection != nil {
+		for i, doc := range docs {
+			projected := document.NewDocument()
+
+			// Always include _id unless explicitly excluded
+			excludeId := false
+			if val, exists := options.Projection["_id"]; exists && !val {
+				excludeId = true
+			}
+
+			if !excludeId {
+				if id, exists := doc.Get("_id"); exists {
+					projected.Set("_id", id)
+				}
+			}
+
+			// Include requested fields
+			for field, include := range options.Projection {
+				if field == "_id" {
+					continue // Already handled above
+				}
+				if include {
+					if val, exists := doc.Get(field); exists {
+						projected.Set(field, val)
+					}
+				}
+			}
+
+			docs[i] = projected
+		}
+	}
+
+	// Apply skip
+	if options != nil && options.Skip > 0 {
+		if options.Skip >= len(docs) {
+			return []*document.Document{}, nil
+		}
+		docs = docs[options.Skip:]
+	}
+
+	// Apply limit
+	if options != nil && options.Limit > 0 && options.Limit < len(docs) {
+		docs = docs[:options.Limit]
+	}
+
+	return docs, nil
 }
 
 // Explain returns the execution plan for a query
@@ -811,4 +1565,305 @@ func compareValues2(a, b interface{}) bool {
 
 	// Direct comparison for other types
 	return a == b
+}
+
+// Near finds documents near a geographic point
+// For 2d indexes: maxDistance is in coordinate units
+// For 2dsphere indexes: maxDistance is in meters
+func (c *Collection) Near(fieldPath string, center *geo.Point, maxDistance float64, limit int, options *QueryOptions) ([]*document.Document, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	// Find the geospatial index for this field
+	var geoIdx *index.GeoIndex
+	for _, idx := range c.geoIndexes {
+		if idx.FieldPath() == fieldPath {
+			geoIdx = idx
+			break
+		}
+	}
+
+	if geoIdx == nil {
+		return nil, fmt.Errorf("no geospatial index found for field %s", fieldPath)
+	}
+
+	// Perform near search
+	results := geoIdx.Near(center, maxDistance, limit)
+
+	// Convert results to documents
+	docs := make([]*document.Document, 0, len(results))
+	for _, result := range results {
+		if doc, exists := c.documents[result.DocID]; exists {
+			// Add distance as metadata field
+			docCopy := document.NewDocumentFromMap(doc.ToMap())
+			docCopy.Set("_distance", result.Distance)
+			docs = append(docs, docCopy)
+		}
+	}
+
+	// Apply projection if specified
+	if options != nil && options.Projection != nil {
+		for i, doc := range docs {
+			projected := document.NewDocument()
+
+			// Always include _id unless explicitly excluded
+			excludeId := false
+			if val, exists := options.Projection["_id"]; exists && !val {
+				excludeId = true
+			}
+
+			if !excludeId {
+				if id, exists := doc.Get("_id"); exists {
+					projected.Set("_id", id)
+				}
+			}
+
+			// Preserve _distance metadata
+			if distance, exists := doc.Get("_distance"); exists {
+				projected.Set("_distance", distance)
+			}
+
+			// Include requested fields
+			for field, include := range options.Projection {
+				if field == "_id" {
+					continue // Already handled above
+				}
+				if include {
+					if val, exists := doc.Get(field); exists {
+						projected.Set(field, val)
+					}
+				}
+			}
+
+			docs[i] = projected
+		}
+	}
+
+	return docs, nil
+}
+
+// GeoWithin finds documents within a polygon
+func (c *Collection) GeoWithin(fieldPath string, polygon *geo.Polygon, options *QueryOptions) ([]*document.Document, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	// Find the geospatial index for this field
+	var geoIdx *index.GeoIndex
+	for _, idx := range c.geoIndexes {
+		if idx.FieldPath() == fieldPath {
+			geoIdx = idx
+			break
+		}
+	}
+
+	if geoIdx == nil {
+		return nil, fmt.Errorf("no geospatial index found for field %s", fieldPath)
+	}
+
+	// Perform within search
+	docIDs := geoIdx.Within(polygon)
+
+	// Convert IDs to documents
+	docs := make([]*document.Document, 0, len(docIDs))
+	for _, id := range docIDs {
+		if doc, exists := c.documents[id]; exists {
+			docs = append(docs, doc)
+		}
+	}
+
+	// Apply projection if specified
+	if options != nil && options.Projection != nil {
+		for i, doc := range docs {
+			projected := document.NewDocument()
+
+			// Always include _id unless explicitly excluded
+			excludeId := false
+			if val, exists := options.Projection["_id"]; exists && !val {
+				excludeId = true
+			}
+
+			if !excludeId {
+				if id, exists := doc.Get("_id"); exists {
+					projected.Set("_id", id)
+				}
+			}
+
+			// Include requested fields
+			for field, include := range options.Projection {
+				if field == "_id" {
+					continue // Already handled above
+				}
+				if include {
+					if val, exists := doc.Get(field); exists {
+						projected.Set(field, val)
+					}
+				}
+			}
+
+			docs[i] = projected
+		}
+	}
+
+	// Apply skip and limit
+	if options != nil {
+		if options.Skip > 0 && options.Skip < len(docs) {
+			docs = docs[options.Skip:]
+		} else if options.Skip >= len(docs) {
+			docs = []*document.Document{}
+		}
+
+		if options.Limit > 0 && options.Limit < len(docs) {
+			docs = docs[:options.Limit]
+		}
+	}
+
+	return docs, nil
+}
+
+// GeoIntersects finds documents whose geometry intersects with a bounding box
+func (c *Collection) GeoIntersects(fieldPath string, box *geo.BoundingBox, options *QueryOptions) ([]*document.Document, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	// Find the geospatial index for this field
+	var geoIdx *index.GeoIndex
+	for _, idx := range c.geoIndexes {
+		if idx.FieldPath() == fieldPath {
+			geoIdx = idx
+			break
+		}
+	}
+
+	if geoIdx == nil {
+		return nil, fmt.Errorf("no geospatial index found for field %s", fieldPath)
+	}
+
+	// Perform intersects search (bounding box query)
+	docIDs := geoIdx.InBox(box)
+
+	// Convert IDs to documents
+	docs := make([]*document.Document, 0, len(docIDs))
+	for _, id := range docIDs {
+		if doc, exists := c.documents[id]; exists {
+			docs = append(docs, doc)
+		}
+	}
+
+	// Apply projection if specified
+	if options != nil && options.Projection != nil {
+		for i, doc := range docs {
+			projected := document.NewDocument()
+
+			// Always include _id unless explicitly excluded
+			excludeId := false
+			if val, exists := options.Projection["_id"]; exists && !val {
+				excludeId = true
+			}
+
+			if !excludeId {
+				if id, exists := doc.Get("_id"); exists {
+					projected.Set("_id", id)
+				}
+			}
+
+			// Include requested fields
+			for field, include := range options.Projection {
+				if field == "_id" {
+					continue // Already handled above
+				}
+				if include {
+					if val, exists := doc.Get(field); exists {
+						projected.Set(field, val)
+					}
+				}
+			}
+
+			docs[i] = projected
+		}
+	}
+
+	// Apply skip and limit
+	if options != nil {
+		if options.Skip > 0 && options.Skip < len(docs) {
+			docs = docs[options.Skip:]
+		} else if options.Skip >= len(docs) {
+			docs = []*document.Document{}
+		}
+
+		if options.Limit > 0 && options.Limit < len(docs) {
+			docs = docs[:options.Limit]
+		}
+	}
+
+	return docs, nil
+}
+
+// CleanupExpiredDocuments removes documents that have expired according to TTL indexes
+// Returns the number of documents deleted
+func (c *Collection) CleanupExpiredDocuments() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if len(c.ttlIndexes) == 0 {
+		return 0
+	}
+
+	currentTime := time.Now()
+	deletedCount := 0
+	toDelete := make(map[string]bool) // Use map to avoid duplicates
+
+	// Collect all expired document IDs from all TTL indexes
+	for _, ttlIdx := range c.ttlIndexes {
+		expiredDocs := ttlIdx.GetExpiredDocuments(currentTime)
+		for _, docID := range expiredDocs {
+			toDelete[docID] = true
+		}
+	}
+
+	// Delete each expired document
+	for docID := range toDelete {
+		doc, exists := c.documents[docID]
+		if !exists {
+			continue
+		}
+
+		// Remove from regular indexes
+		for _, idx := range c.indexes {
+			if idx.IsCompound() {
+				if compositeKey, allFieldsExist := c.extractCompositeKey(doc, idx.FieldPaths()); allFieldsExist {
+					idx.Delete(compositeKey)
+				}
+			} else {
+				if fieldValue, exists := doc.Get(idx.FieldPath()); exists {
+					idx.Delete(fieldValue)
+				}
+			}
+		}
+
+		// Remove from text indexes
+		for _, textIdx := range c.textIndexes {
+			textIdx.Remove(docID)
+		}
+
+		// Remove from geo indexes
+		for _, geoIdx := range c.geoIndexes {
+			geoIdx.Remove(docID)
+		}
+
+		// Remove from TTL indexes
+		for _, ttlIdx := range c.ttlIndexes {
+			ttlIdx.Remove(docID)
+		}
+
+		// Delete the document
+		delete(c.documents, docID)
+		deletedCount++
+	}
+
+	// Invalidate query cache if documents were deleted
+	if deletedCount > 0 {
+		c.queryCache.Clear()
+	}
+
+	return deletedCount
 }

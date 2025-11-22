@@ -37,6 +37,11 @@ const (
 	OpAll      Operator = "$all"
 	OpElemMatch Operator = "$elemMatch"
 	OpSize     Operator = "$size"
+
+	// Geospatial operators
+	OpNear          Operator = "$near"
+	OpGeoWithin     Operator = "$geoWithin"
+	OpGeoIntersects Operator = "$geoIntersects"
 )
 
 // EvaluateOperator evaluates an operator expression

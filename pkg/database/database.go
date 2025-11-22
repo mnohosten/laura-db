@@ -3,6 +3,7 @@ package database
 import (
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/mnohosten/laura-db/pkg/mvcc"
 	"github.com/mnohosten/laura-db/pkg/storage"
@@ -10,12 +11,14 @@ import (
 
 // Database represents a database instance
 type Database struct {
-	name        string
-	collections map[string]*Collection
-	storage     *storage.StorageEngine
-	txnMgr      *mvcc.TransactionManager
-	mu          sync.RWMutex
-	isOpen      bool
+	name         string
+	collections  map[string]*Collection
+	storage      *storage.StorageEngine
+	txnMgr       *mvcc.TransactionManager
+	mu           sync.RWMutex
+	isOpen       bool
+	ttlStopChan  chan struct{} // Channel to signal TTL cleanup goroutine to stop
+	ttlWaitGroup sync.WaitGroup
 }
 
 // Config holds database configuration
@@ -52,7 +55,11 @@ func Open(config *Config) (*Database, error) {
 		storage:     storageEngine,
 		txnMgr:      txnMgr,
 		isOpen:      true,
+		ttlStopChan: make(chan struct{}),
 	}
+
+	// Start TTL cleanup goroutine
+	db.startTTLCleanup()
 
 	return db, nil
 }
@@ -135,6 +142,10 @@ func (db *Database) Close() error {
 		return nil
 	}
 
+	// Stop TTL cleanup goroutine
+	close(db.ttlStopChan)
+	db.ttlWaitGroup.Wait()
+
 	// Flush all data
 	if err := db.storage.FlushAll(); err != nil {
 		return fmt.Errorf("failed to flush data: %w", err)
@@ -170,5 +181,38 @@ func (db *Database) Stats() map[string]interface{} {
 		"collection_stats":      collectionStats,
 		"active_transactions":   db.txnMgr.GetActiveTransactions(),
 		"storage_stats":         db.storage.Stats(),
+	}
+}
+
+// startTTLCleanup starts a background goroutine that periodically cleans up expired documents
+func (db *Database) startTTLCleanup() {
+	db.ttlWaitGroup.Add(1)
+	go db.ttlCleanupLoop()
+}
+
+// ttlCleanupLoop runs the TTL cleanup process every 60 seconds
+func (db *Database) ttlCleanupLoop() {
+	defer db.ttlWaitGroup.Done()
+
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			db.cleanupExpiredDocuments()
+		case <-db.ttlStopChan:
+			return
+		}
+	}
+}
+
+// cleanupExpiredDocuments runs cleanup on all collections with TTL indexes
+func (db *Database) cleanupExpiredDocuments() {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	for _, coll := range db.collections {
+		coll.CleanupExpiredDocuments()
 	}
 }

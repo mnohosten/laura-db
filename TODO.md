@@ -138,9 +138,21 @@ LauraDB is a functional MongoDB-like document database with most core features i
 ### Priority 1: Core Improvements
 
 #### Query Enhancements
-- [ ] Text search with $text operator
+- [x] **Text search with TextSearch API** ✨ NEW
+  - Inverted index with BM25 relevance scoring
+  - Tokenization, stop word filtering, Porter stemming
+  - Multi-field text indexing
+  - Automatic index maintenance
+  - 1.9x faster than regex-based search
 - [x] **Regular expression queries ($regex)** ✨ NEW
-- [ ] Geospatial queries ($near, $geoWithin)
+- [x] **Geospatial queries ($near, $geoWithin, $geoIntersects)** ✨ NEW
+  - 2d planar indexes for flat coordinate systems
+  - 2dsphere spherical indexes for Earth coordinates
+  - Haversine distance calculations
+  - Proximity queries with Near()
+  - Polygon containment with GeoWithin()
+  - Bounding box queries with GeoIntersects()
+  - Automatic index maintenance
 - [x] **Array query operators ($elemMatch, $size)** ✨ NEW
 
 #### Update Operators
@@ -151,11 +163,45 @@ LauraDB is a functional MongoDB-like document database with most core features i
 - [ ] $bit (bitwise operations)
 
 #### Index Improvements
-- [ ] Compound indexes (multiple fields)
-- [ ] Text indexes for full-text search
-- [ ] Geospatial indexes (2d, 2dsphere)
-- [ ] TTL indexes (time-to-live)
-- [ ] Partial indexes (with filter expressions)
+- [x] **Compound indexes (multiple fields)** ✨ NEW
+  - Composite key support with lexicographic ordering
+  - Prefix matching for efficient partial queries
+  - Unique compound constraints
+  - Automatic maintenance during updates
+  - Statistics tracking and query optimization
+- [x] **Text indexes for full-text search** ✨ NEW
+  - Inverted index with BM25 relevance scoring
+  - Porter stemming and stop word filtering
+  - Multi-field text indexing
+  - Automatic maintenance on CRUD operations
+- [x] **Geospatial indexes (2d, 2dsphere)** ✨ NEW
+  - Grid-based spatial indexing for efficient range queries
+  - 2d indexes for planar coordinates (Euclidean distance)
+  - 2dsphere indexes for spherical coordinates (Haversine distance)
+  - Point and Polygon geometry support
+  - GeoJSON-compatible format
+  - Automatic coordinate validation
+  - Comprehensive test coverage (27+ tests)
+  - Performance benchmarks
+  - Full documentation in docs/geospatial.md
+- [x] **TTL indexes (time-to-live)** ✨ NEW
+  - Automatic document expiration and deletion
+  - Background cleanup every 60 seconds
+  - Support for time.Time, RFC3339 strings, and Unix timestamps
+  - Multiple TTL indexes per collection
+  - Minimal overhead (~7% on inserts)
+  - 13 comprehensive tests
+  - 10 performance benchmarks
+  - Full documentation in docs/ttl-indexes.md
+- [x] **Partial indexes (with filter expressions)** ✨ NEW
+  - Index only documents matching filter expression
+  - Support for all query operators ($gt, $gte, $lt, $lte, $eq, $ne, $in, $and, $or, etc.)
+  - Automatic filter evaluation during insert/update/delete
+  - Memory and performance benefits for selective indexing
+  - CreatePartialIndex() API for easy creation
+  - Unique partial indexes supported
+  - 10 comprehensive tests
+  - 11 performance benchmarks
 - [ ] Index build in background
 
 ### Priority 2: Performance & Scalability
@@ -166,10 +212,17 @@ LauraDB is a functional MongoDB-like document database with most core features i
   - 5-minute TTL with automatic expiration
   - 96x performance improvement (328µs → 3.4µs)
   - Thread-safe with cache invalidation on writes
-- [ ] Statistics-based query optimization
+- [x] **Statistics-based query optimization** ✨ NEW
+  - Cardinality and selectivity tracking for indexes
+  - Cost-based index selection
+  - Intelligent query planning with minimal overhead (~1.3µs)
+  - Automatic stale detection and index analysis
+- [x] **Covered queries (query entirely from index)** ✨ NEW
+  - 2.2x performance improvement (109µs → 49µs)
+  - Automatic detection when index contains all queried fields
+  - Zero document fetches for covered queries
 - [ ] Parallel query execution
 - [ ] Index intersection (using multiple indexes)
-- [ ] Covered queries (query entirely from index)
 
 #### Storage Optimization
 - [ ] Compression for documents and indexes
@@ -327,16 +380,21 @@ LauraDB is a functional MongoDB-like document database with most core features i
 
 ## 📊 Current Statistics
 
-- **Lines of Code**: ~11,000+ (Go)
-- **Test Files**: 21+ (added cache tests)
-- **Test Cases**: 123+ (added 5 cache tests + 4 benchmarks)
-- **Packages**: 10 core packages (added pkg/cache)
+- **Lines of Code**: ~19,500+ (Go) (added partial index system)
+- **Test Files**: 36+ (added partial index tests and benchmarks)
+- **Test Cases**: 210+ (added 10 partial index tests)
+- **Packages**: 12 core packages
 - **Examples**: 3 working examples
 - **HTTP Endpoints**: 15+
-- **Supported Query Operators**: 15+ (added $elemMatch, $size, $regex)
+- **Supported Query Operators**: 18+ (added $elemMatch, $size, $regex, $near, $geoWithin, $geoIntersects)
 - **Update Operators**: 13+ (added $rename, $currentDate, $pullAll, $each modifier)
 - **Aggregation Stages**: 6
+- **Index Types**: Single-field, Compound (multi-field), Text (full-text search), 2d (planar), 2dsphere (spherical), TTL (time-to-live), Unique
 - **Query Cache**: LRU with TTL (96x performance improvement)
+- **Query Optimization**: Statistics-based cost estimation (intelligent index selection)
+- **Covered Queries**: Automatic detection (2.2x performance improvement)
+- **Text Search**: BM25 scoring with stemming (1.9x faster than regex)
+- **Geospatial**: 2d/2dsphere indexes with Haversine distance (~6.2ms for 1000 docs)
 
 ---
 
@@ -357,8 +415,74 @@ LauraDB is a functional MongoDB-like document database with most core features i
   - Thread-safe with automatic invalidation on writes
   - 1000 entry capacity with 5-minute TTL
   - Comprehensive tests and benchmarks
+- ✅ **Implemented statistics-based query optimization** ✨ NEW
+  - Index statistics tracking (cardinality, selectivity, min/max values)
+  - Cost-based index selection using statistics
+  - Intelligent query planner chooses optimal index
+  - ~1.3µs planning overhead with excellent scalability
+  - Automatic stale detection on insert/delete
+- ✅ **Implemented covered queries** ✨ NEW
+  - 2.2x performance improvement (109µs → 49µs)
+  - Automatic detection when index contains all queried fields
+  - Zero document fetches for covered queries
+- ✅ **Implemented compound indexes** ✨ NEW
+  - Multi-field indexes with composite key support
+  - Prefix matching for partial queries (O(log n + k))
+  - Unique compound constraints
+  - Automatic maintenance during updates
+  - Query planner integration with cost-based selection
+  - Comprehensive tests and benchmarks
+  - Full documentation in docs/indexing.md
+- ✅ **Implemented full-text search** ✨ NEW
+  - Inverted index data structure for efficient text retrieval
+  - Text analyzer with tokenization, normalization, and Porter stemming
+  - BM25 relevance scoring (improved TF-IDF algorithm)
+  - Multi-field text indexing support
+  - Automatic index maintenance on CRUD operations
+  - Stop word filtering (70+ common English words)
+  - 1.9x faster than regex-based search, 54% less memory
+  - 10 comprehensive integration tests
+  - 7 performance benchmarks
+  - Full documentation in docs/text-search.md
+- ✅ **Implemented geospatial queries** ✨ NEW
+  - Point and Polygon geometry types with GeoJSON parsing
+  - 2d planar indexes for flat coordinate systems (games, simulations)
+  - 2dsphere spherical indexes for Earth coordinates (GPS, maps)
+  - Haversine distance calculations for accurate Earth surface distances
+  - Near() for proximity queries (sorted by distance)
+  - GeoWithin() for polygon containment queries
+  - GeoIntersects() for bounding box queries
+  - Grid-based spatial indexing (O(1) insert, O(C + K) query)
+  - Automatic coordinate validation (lon: -180 to 180, lat: -90 to 90)
+  - Automatic index maintenance on CRUD operations
+  - 27+ comprehensive tests (geometry, indexes, integration)
+  - 11 performance benchmarks
+  - Full documentation in docs/geospatial.md
+- ✅ **Implemented TTL (time-to-live) indexes** ✨ NEW
+  - Automatic document expiration and deletion
+  - Background cleanup goroutine runs every 60 seconds
+  - Support for time.Time, RFC3339 strings, and Unix timestamps
+  - Multiple TTL indexes per collection
+  - CreateTTLIndex() API for easy creation
+  - Minimal performance overhead (~7% on inserts, ~14µs per document)
+  - Efficient cleanup: 7ms for 500 expired documents
+  - Automatic index maintenance on insert, update, delete
+  - 13 comprehensive tests covering all use cases
+  - 10 performance benchmarks
+  - Full documentation in docs/ttl-indexes.md
+- ✅ **Implemented partial indexes with filter expressions** ✨ NEW
+  - Selective indexing based on query filter expressions
+  - Filter field added to IndexConfig and Index
+  - matchesPartialIndexFilter() helper for filter evaluation
+  - Automatic filter checking during insert/update operations
+  - CreatePartialIndex(fieldPath, filter, unique) API
+  - Support for simple and complex filters ($gt, $and, $or, etc.)
+  - Memory savings by indexing subset of documents
+  - Unique partial indexes for conditional uniqueness
+  - 10 comprehensive tests (all pass)
+  - 11 performance benchmarks
 - ✅ Fixed time.Time support in document value type system
-- ✅ Created comprehensive test suites for all new operators (123+ tests)
+- ✅ Created comprehensive test suites for all new operators (160+ tests)
 - ✅ Added Makefile for easier building (including CLI build target)
 - ✅ Created BUILD.md, TESTING.md, BENCHMARKS.md, and CLI documentation
 - ✅ Established performance baselines (93K inserts/sec, 24K queries/sec)
@@ -390,4 +514,4 @@ LauraDB is a functional MongoDB-like document database with most core features i
 
 ---
 
-**Last Updated**: Implemented high-performance LRU query cache with 96x performance improvement
+**Last Updated**: Completed partial indexes with filter expressions, automatic filter evaluation, comprehensive tests, and benchmarks

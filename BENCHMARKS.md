@@ -41,6 +41,33 @@ make bench-index
 - ✅ **Update throughput**: ~18K updates/second
 - ⚠️ **Aggregation**: Room for optimization
 
+### Query Optimization (Statistics-Based)
+
+| Benchmark | Ops/sec | ns/op | B/op | allocs/op | Notes |
+|-----------|---------|-------|------|-----------|-------|
+| PlannerWithStatistics | **1M** | **1,334** | **464** | **5** | Plan query with stats |
+| PlannerWithoutStatistics | 853K | 1,405 | 464 | 5 | Plan query without stats |
+| IndexAnalyze (100 entries) | 252K | 4,471 | 3,400 | 17 | Collect index statistics |
+| IndexAnalyze (1K entries) | 248K | 4,856 | 3,400 | 17 | Scales well with size |
+| IndexAnalyze (10K entries) | 262K | 5,122 | 2,376 | 15 | Minimal overhead |
+| IndexAnalyze (100K entries) | 249K | 5,120 | 2,376 | 15 | Excellent scalability |
+| CostEstimation (card=10) | 2.75M | 428 | 288 | 2 | Low cardinality index |
+| CostEstimation (card=100) | 3.04M | 399 | 288 | 2 | Medium cardinality |
+| CostEstimation (card=1000) | 2.83M | 417 | 288 | 2 | High cardinality |
+| CostEstimation (card=10K) | 2.26M | 545 | 288 | 2 | Very high cardinality |
+| MultiIndexSelection (2) | 1M | 1,337 | 464 | 5 | Choose from 2 indexes |
+| MultiIndexSelection (5) | 341K | 3,319 | 1,424 | 21 | Choose from 5 indexes |
+| MultiIndexSelection (10) | 111K | 11,363 | 6,544 | 61 | Choose from 10 indexes |
+| MultiIndexSelection (20) | 23K | 52,002 | 23,184 | 141 | Choose from 20 indexes |
+| RangeQueryCostEstimation | 1.9M | 601 | 288 | 2 | Range query planning |
+
+**Key Findings:**
+- 🚀 **Planning overhead**: Minimal (~1.3μs per query)
+- ✅ **Analyze performance**: ~5μs regardless of index size (100-100K entries)
+- ✅ **Cost estimation**: Sub-microsecond (~400-600ns)
+- ✅ **Scales linearly**: With number of indexes (2→20: 1.3μs→52μs)
+- ✅ **Real-world impact**: For typical DBs with 2-10 indexes, adds <20μs overhead
+
 ### Index Operations (B+ Tree)
 
 | Benchmark | Ops/sec | ns/op | B/op | allocs/op | Notes |

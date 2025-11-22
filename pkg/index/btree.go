@@ -282,21 +282,35 @@ func (bt *BTree) RangeScan(start, end interface{}) ([]interface{}, []interface{}
 	keys := make([]interface{}, 0)
 	values := make([]interface{}, 0)
 
-	// Find the first leaf containing start
-	leaf := bt.findLeaf(bt.root, start)
+	// If start is nil, begin from the leftmost leaf
+	var leaf *BTreeNode
+	if start == nil {
+		// Find leftmost leaf
+		leaf = bt.root
+		for !leaf.isLeaf {
+			leaf = leaf.children[0]
+		}
+	} else {
+		// Find the first leaf containing start
+		leaf = bt.findLeaf(bt.root, start)
+	}
 
 	// Scan through leaves using the linked list
 	for leaf != nil {
 		for i, k := range leaf.keys {
-			cmpStart := bt.compare(k, start)
-			cmpEnd := bt.compare(k, end)
+			// Check if key is >= start (or start is nil)
+			includeStart := start == nil || bt.compare(k, start) >= 0
 
-			if cmpStart >= 0 && cmpEnd <= 0 {
+			// Check if key is <= end (or end is nil)
+			includeEnd := end == nil || bt.compare(k, end) <= 0
+
+			if includeStart && includeEnd {
 				keys = append(keys, k)
 				values = append(values, leaf.values[i])
 			}
 
-			if cmpEnd > 0 {
+			// Stop if we've passed the end
+			if end != nil && bt.compare(k, end) > 0 {
 				return keys, values
 			}
 		}
@@ -329,6 +343,15 @@ func (bt *BTree) findPosition(keys []interface{}, key interface{}) int {
 // compare compares two keys
 // Returns: -1 if a < b, 0 if a == b, 1 if a > b
 func (bt *BTree) compare(a, b interface{}) int {
+	// Handle CompositeKey first (for compound indexes)
+	if va, ok := a.(*CompositeKey); ok {
+		if vb, ok := b.(*CompositeKey); ok {
+			return va.Compare(vb)
+		}
+		// If one is composite and other isn't, they're not comparable
+		return 0
+	}
+
 	// Need to import document package for ObjectID
 	// So we'll handle it by type assertion
 	switch va := a.(type) {
