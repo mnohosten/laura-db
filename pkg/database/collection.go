@@ -2,6 +2,7 @@ package database
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -986,41 +987,64 @@ func (c *Collection) matchesPartialIndexFilter(d *document.Document, idx *index.
 
 // CreateIndex creates an index on a field
 func (c *Collection) CreateIndex(fieldPath string, unique bool) error {
+	return c.CreateIndexWithBackground(fieldPath, unique, false)
+}
+
+// CreateIndexWithBackground creates an index on a field with optional background building
+func (c *Collection) CreateIndexWithBackground(fieldPath string, unique bool, background bool) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 
 	indexName := fieldPath + "_1"
 	if _, exists := c.indexes[indexName]; exists {
+		c.mu.Unlock()
 		return fmt.Errorf("index %s already exists", indexName)
 	}
 
 	idx := index.NewIndex(&index.IndexConfig{
-		Name:      indexName,
-		FieldPath: fieldPath,
-		Type:      index.IndexTypeBTree,
-		Unique:    unique,
-		Order:     32,
+		Name:       indexName,
+		FieldPath:  fieldPath,
+		Type:       index.IndexTypeBTree,
+		Unique:     unique,
+		Order:      32,
+		Background: background,
 	})
 
-	// Build index from existing documents
-	for id, doc := range c.documents {
-		if fieldValue, exists := doc.Get(fieldPath); exists {
-			if err := idx.Insert(fieldValue, id); err != nil {
-				return fmt.Errorf("failed to build index: %w", err)
+	// Add index to collection immediately (even if building in background)
+	c.indexes[indexName] = idx
+
+	if background {
+		// Capture snapshot of documents while holding lock
+		snapshots := c.captureSingleFieldSnapshot(idx, fieldPath)
+		c.mu.Unlock()
+		// Build index in background (after releasing lock)
+		c.buildSingleFieldIndexInBackgroundWithSnapshot(idx, snapshots)
+	} else {
+		// Build index synchronously from existing documents
+		for id, doc := range c.documents {
+			if fieldValue, exists := doc.Get(fieldPath); exists {
+				if err := idx.Insert(fieldValue, id); err != nil {
+					c.mu.Unlock()
+					return fmt.Errorf("failed to build index: %w", err)
+				}
 			}
 		}
+		c.mu.Unlock()
 	}
 
-	c.indexes[indexName] = idx
 	return nil
 }
 
 // CreateCompoundIndex creates a compound index on multiple fields
 func (c *Collection) CreateCompoundIndex(fieldPaths []string, unique bool) error {
+	return c.CreateCompoundIndexWithBackground(fieldPaths, unique, false)
+}
+
+// CreateCompoundIndexWithBackground creates a compound index on multiple fields with optional background building
+func (c *Collection) CreateCompoundIndexWithBackground(fieldPaths []string, unique bool, background bool) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 
 	if len(fieldPaths) == 0 {
+		c.mu.Unlock()
 		return fmt.Errorf("compound index must have at least one field")
 	}
 
@@ -1035,6 +1059,7 @@ func (c *Collection) CreateCompoundIndex(fieldPaths []string, unique bool) error
 	indexName += "_1"
 
 	if _, exists := c.indexes[indexName]; exists {
+		c.mu.Unlock()
 		return fmt.Errorf("index %s already exists", indexName)
 	}
 
@@ -1044,33 +1069,46 @@ func (c *Collection) CreateCompoundIndex(fieldPaths []string, unique bool) error
 		Type:       index.IndexTypeBTree,
 		Unique:     unique,
 		Order:      32,
+		Background: background,
 	})
 
-	// Build index from existing documents
-	for id, doc := range c.documents {
-		// Extract all field values for the composite key
-		values := make([]interface{}, 0, len(fieldPaths))
-		allFieldsExist := true
+	// Add index to collection immediately (even if building in background)
+	c.indexes[indexName] = idx
 
-		for _, fieldPath := range fieldPaths {
-			if fieldValue, exists := doc.Get(fieldPath); exists {
-				values = append(values, fieldValue)
-			} else {
-				// If any field is missing, skip this document
-				allFieldsExist = false
-				break
+	if background {
+		// Capture snapshot of documents while holding lock
+		snapshots := c.captureCompoundIndexSnapshot(idx, fieldPaths)
+		c.mu.Unlock()
+		// Build index in background (after releasing lock)
+		c.buildCompoundIndexInBackgroundWithSnapshot(idx, snapshots)
+	} else {
+		// Build index synchronously from existing documents
+		for id, doc := range c.documents {
+			// Extract all field values for the composite key
+			values := make([]interface{}, 0, len(fieldPaths))
+			allFieldsExist := true
+
+			for _, fieldPath := range fieldPaths {
+				if fieldValue, exists := doc.Get(fieldPath); exists {
+					values = append(values, fieldValue)
+				} else {
+					// If any field is missing, skip this document
+					allFieldsExist = false
+					break
+				}
+			}
+
+			if allFieldsExist {
+				compositeKey := index.NewCompositeKey(values...)
+				if err := idx.Insert(compositeKey, id); err != nil {
+					c.mu.Unlock()
+					return fmt.Errorf("failed to build compound index: %w", err)
+				}
 			}
 		}
-
-		if allFieldsExist {
-			compositeKey := index.NewCompositeKey(values...)
-			if err := idx.Insert(compositeKey, id); err != nil {
-				return fmt.Errorf("failed to build compound index: %w", err)
-			}
-		}
+		c.mu.Unlock()
 	}
 
-	c.indexes[indexName] = idx
 	return nil
 }
 
@@ -1866,4 +1904,183 @@ func (c *Collection) CleanupExpiredDocuments() int {
 	}
 
 	return deletedCount
+}
+
+// docSnapshot represents a snapshot of a document for background index building
+type docSnapshot struct {
+	id            string
+	fieldValue    interface{}
+	compositeKey  *index.CompositeKey
+	allFieldsExist bool
+	matchesFilter bool
+}
+
+// captureSingleFieldSnapshot captures a snapshot of documents for single-field index building
+// Must be called while holding c.mu lock
+func (c *Collection) captureSingleFieldSnapshot(idx *index.Index, fieldPath string) []docSnapshot {
+	snapshots := make([]docSnapshot, 0, len(c.documents))
+	for id, doc := range c.documents {
+		snapshot := docSnapshot{id: id}
+
+		// Check if document matches partial index filter (if applicable)
+		if idx.IsPartial() {
+			snapshot.matchesFilter = c.matchesPartialIndexFilter(doc, idx)
+			if !snapshot.matchesFilter {
+				snapshots = append(snapshots, snapshot)
+				continue
+			}
+		} else {
+			snapshot.matchesFilter = true
+		}
+
+		// Extract field value at snapshot time
+		if fieldValue, exists := doc.Get(fieldPath); exists {
+			snapshot.fieldValue = fieldValue
+		}
+
+		snapshots = append(snapshots, snapshot)
+	}
+	return snapshots
+}
+
+// buildSingleFieldIndexInBackgroundWithSnapshot builds index from a snapshot in the background
+func (c *Collection) buildSingleFieldIndexInBackgroundWithSnapshot(idx *index.Index, snapshots []docSnapshot) {
+	// Start build in goroutine
+	go func() {
+		// Mark index as building
+		idx.StartBuild(len(snapshots))
+
+		// Process documents
+		for _, snapshot := range snapshots {
+			// Skip documents that don't match filter
+			if !snapshot.matchesFilter {
+				idx.IncrementBuildProgress()
+				continue
+			}
+
+			// Skip documents without the indexed field
+			if snapshot.fieldValue == nil {
+				idx.IncrementBuildProgress()
+				continue
+			}
+
+			// Insert into index (may fail if already exists due to concurrent write)
+			if err := idx.Insert(snapshot.fieldValue, snapshot.id); err != nil {
+				// Skip duplicate key errors - document was likely added by concurrent write
+				// This can happen when a document from the snapshot gets updated/inserted
+				// after the snapshot but before the background builder processes it
+				errMsg := err.Error()
+				if strings.Contains(errMsg, "duplicate") {
+					// Skip duplicate (concurrent insert already added it)
+					idx.IncrementBuildProgress()
+					continue
+				}
+				// Real error - mark build as failed
+				idx.FailBuild(fmt.Sprintf("failed to build index: %v", err))
+				return
+			}
+
+			idx.IncrementBuildProgress()
+		}
+
+		// Mark index as ready
+		idx.CompleteBuild()
+	}()
+}
+
+// captureCompoundIndexSnapshot captures a snapshot of documents for compound index building
+// Must be called while holding c.mu lock
+func (c *Collection) captureCompoundIndexSnapshot(idx *index.Index, fieldPaths []string) []docSnapshot {
+	snapshots := make([]docSnapshot, 0, len(c.documents))
+	for id, doc := range c.documents {
+		snapshot := docSnapshot{id: id}
+
+		// Check if document matches partial index filter (if applicable)
+		if idx.IsPartial() {
+			snapshot.matchesFilter = c.matchesPartialIndexFilter(doc, idx)
+			if !snapshot.matchesFilter {
+				snapshots = append(snapshots, snapshot)
+				continue
+			}
+		} else {
+			snapshot.matchesFilter = true
+		}
+
+		// Extract all field values for the composite key at snapshot time
+		values := make([]interface{}, 0, len(fieldPaths))
+		snapshot.allFieldsExist = true
+
+		for _, fieldPath := range fieldPaths {
+			if fieldValue, exists := doc.Get(fieldPath); exists {
+				values = append(values, fieldValue)
+			} else {
+				// If any field is missing, skip this document
+				snapshot.allFieldsExist = false
+				break
+			}
+		}
+
+		if snapshot.allFieldsExist {
+			snapshot.compositeKey = index.NewCompositeKey(values...)
+		}
+
+		snapshots = append(snapshots, snapshot)
+	}
+	return snapshots
+}
+
+// buildCompoundIndexInBackgroundWithSnapshot builds compound index from a snapshot in the background
+func (c *Collection) buildCompoundIndexInBackgroundWithSnapshot(idx *index.Index, snapshots []docSnapshot) {
+	// Start build in goroutine
+	go func() {
+		// Mark index as building
+		idx.StartBuild(len(snapshots))
+
+		// Process documents
+		for _, snapshot := range snapshots {
+			// Skip documents that don't match filter
+			if !snapshot.matchesFilter {
+				idx.IncrementBuildProgress()
+				continue
+			}
+
+			// Skip documents without all required fields
+			if !snapshot.allFieldsExist || snapshot.compositeKey == nil {
+				idx.IncrementBuildProgress()
+				continue
+			}
+
+			// Insert into index (may fail if already exists due to concurrent write)
+			if err := idx.Insert(snapshot.compositeKey, snapshot.id); err != nil {
+				// Skip duplicate key errors - document was likely added by concurrent write
+				errMsg := err.Error()
+				if strings.Contains(errMsg, "duplicate") {
+					// Skip duplicate (concurrent insert already added it)
+					idx.IncrementBuildProgress()
+					continue
+				}
+				// Real error - mark build as failed
+				idx.FailBuild(fmt.Sprintf("failed to build compound index: %v", err))
+				return
+			}
+
+			idx.IncrementBuildProgress()
+		}
+
+		// Mark index as ready
+		idx.CompleteBuild()
+	}()
+}
+
+// GetIndexBuildProgress returns the build progress for a named index
+func (c *Collection) GetIndexBuildProgress(indexName string) (map[string]interface{}, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	idx, exists := c.indexes[indexName]
+	if !exists {
+		return nil, fmt.Errorf("index %s not found", indexName)
+	}
+
+	return idx.GetBuildProgress(), nil
 }

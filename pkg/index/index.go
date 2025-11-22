@@ -18,14 +18,15 @@ const (
 
 // Index represents a database index
 type Index struct {
-	name       string
-	fieldPaths []string               // Multiple fields for compound indexes
-	indexType  IndexType
-	isUnique   bool
-	filter     map[string]interface{} // Partial index filter (nil = full index)
-	btree      *BTree
-	stats      *IndexStats
-	mu         sync.RWMutex
+	name          string
+	fieldPaths    []string               // Multiple fields for compound indexes
+	indexType     IndexType
+	isUnique      bool
+	filter        map[string]interface{} // Partial index filter (nil = full index)
+	btree         *BTree
+	stats         *IndexStats
+	buildProgress *IndexBuildProgress // Track background index build progress
+	mu            sync.RWMutex
 }
 
 // IndexConfig holds configuration for creating an index
@@ -37,6 +38,7 @@ type IndexConfig struct {
 	Unique     bool
 	Order      int                    // B-tree order
 	Filter     map[string]interface{} // Partial index filter expression
+	Background bool                   // Build index in background (non-blocking)
 }
 
 // NewIndex creates a new index
@@ -53,12 +55,13 @@ func NewIndex(config *IndexConfig) *Index {
 	}
 
 	idx := &Index{
-		name:       config.Name,
-		fieldPaths: fieldPaths,
-		indexType:  config.Type,
-		isUnique:   config.Unique,
-		filter:     config.Filter,
-		stats:      NewIndexStats(),
+		name:          config.Name,
+		fieldPaths:    fieldPaths,
+		indexType:     config.Type,
+		isUnique:      config.Unique,
+		filter:        config.Filter,
+		stats:         NewIndexStats(),
+		buildProgress: NewIndexBuildProgress(),
 	}
 
 	switch config.Type {
@@ -191,6 +194,15 @@ func (idx *Index) Stats() map[string]interface{} {
 		stats["filter"] = idx.filter
 	}
 
+	// Add build progress if index is building
+	if idx.buildProgress != nil {
+		buildState := idx.buildProgress.GetState()
+		stats["build_state"] = buildState.String()
+		if buildState == IndexStateBuilding {
+			stats["build_progress"] = idx.buildProgress.GetProgress()
+		}
+	}
+
 	// Add index statistics
 	for k, v := range idx.stats.ToMap() {
 		stats[k] = v
@@ -239,4 +251,67 @@ func (idx *Index) Analyze() {
 // GetStatistics returns the index statistics object
 func (idx *Index) GetStatistics() *IndexStats {
 	return idx.stats
+}
+
+// GetBuildState returns the current index build state
+func (idx *Index) GetBuildState() IndexBuildState {
+	if idx.buildProgress == nil {
+		return IndexStateReady
+	}
+	return idx.buildProgress.GetState()
+}
+
+// GetBuildProgress returns the build progress information
+func (idx *Index) GetBuildProgress() map[string]interface{} {
+	if idx.buildProgress == nil {
+		return map[string]interface{}{
+			"state": "ready",
+		}
+	}
+	return idx.buildProgress.GetProgress()
+}
+
+// IsReady returns true if the index is ready to use (not building)
+func (idx *Index) IsReady() bool {
+	return idx.GetBuildState() == IndexStateReady
+}
+
+// IsBuilding returns true if the index is currently being built
+func (idx *Index) IsBuilding() bool {
+	return idx.GetBuildState() == IndexStateBuilding
+}
+
+// StartBuild marks the index build as started
+func (idx *Index) StartBuild(totalDocs int) {
+	if idx.buildProgress != nil {
+		idx.buildProgress.Start(totalDocs)
+	}
+}
+
+// UpdateBuildProgress updates the number of processed documents
+func (idx *Index) UpdateBuildProgress(processed int) {
+	if idx.buildProgress != nil {
+		idx.buildProgress.Update(processed)
+	}
+}
+
+// IncrementBuildProgress increments the processed document count by one
+func (idx *Index) IncrementBuildProgress() {
+	if idx.buildProgress != nil {
+		idx.buildProgress.Increment()
+	}
+}
+
+// CompleteBuild marks the index build as completed successfully
+func (idx *Index) CompleteBuild() {
+	if idx.buildProgress != nil {
+		idx.buildProgress.Complete()
+	}
+}
+
+// FailBuild marks the index build as failed
+func (idx *Index) FailBuild(err string) {
+	if idx.buildProgress != nil {
+		idx.buildProgress.Fail(err)
+	}
 }

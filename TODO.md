@@ -202,7 +202,16 @@ LauraDB is a functional MongoDB-like document database with most core features i
   - Unique partial indexes supported
   - 10 comprehensive tests
   - 11 performance benchmarks
-- [ ] Index build in background
+- [x] **Background index building** ✨ NEW
+  - Non-blocking index creation with CreateIndexWithBackground()
+  - Real-time progress tracking with build state (building/ready/failed)
+  - Supports both single-field and compound indexes
+  - Concurrent write handling during index build
+  - Automatic duplicate detection and handling
+  - GetIndexBuildProgress() API for monitoring
+  - 9 comprehensive tests (empty, small, large, concurrent operations)
+  - 5 performance benchmarks
+  - Snapshot-based approach prevents data inconsistency
 
 ### Priority 2: Performance & Scalability
 
@@ -380,9 +389,9 @@ LauraDB is a functional MongoDB-like document database with most core features i
 
 ## 📊 Current Statistics
 
-- **Lines of Code**: ~19,500+ (Go) (added partial index system)
-- **Test Files**: 36+ (added partial index tests and benchmarks)
-- **Test Cases**: 210+ (added 10 partial index tests)
+- **Lines of Code**: ~20,000+ (Go) (added background index building)
+- **Test Files**: 38+ (added background index tests and benchmarks)
+- **Test Cases**: 220+ (added 9 background index tests)
 - **Packages**: 12 core packages
 - **Examples**: 3 working examples
 - **HTTP Endpoints**: 15+
@@ -481,6 +490,17 @@ LauraDB is a functional MongoDB-like document database with most core features i
   - Unique partial indexes for conditional uniqueness
   - 10 comprehensive tests (all pass)
   - 11 performance benchmarks
+- ✅ **Implemented background index building** ✨ NEW
+  - Non-blocking index creation with goroutines
+  - IndexBuildState enum (ready/building/failed) for state tracking
+  - IndexBuildProgress struct with real-time metrics
+  - CreateIndexWithBackground() and CreateCompoundIndexWithBackground() APIs
+  - Snapshot-based building to avoid race conditions
+  - Concurrent write support during index build
+  - Automatic duplicate handling for concurrent operations
+  - GetIndexBuildProgress() for monitoring build status
+  - 9 comprehensive tests covering various scenarios
+  - 5 performance benchmarks
 - ✅ Fixed time.Time support in document value type system
 - ✅ Created comprehensive test suites for all new operators (160+ tests)
 - ✅ Added Makefile for easier building (including CLI build target)
@@ -514,4 +534,4 @@ LauraDB is a functional MongoDB-like document database with most core features i
 
 ---
 
-**Last Updated**: Completed partial indexes with filter expressions, automatic filter evaluation, comprehensive tests, and benchmarks
+**Last Updated**: Completed background index building with progress tracking, concurrent write support, comprehensive tests, and benchmarks
