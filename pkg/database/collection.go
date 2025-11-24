@@ -24,7 +24,7 @@ type Collection struct {
 	geoIndexes  map[string]*index.GeoIndex    // geo index name -> geo index
 	ttlIndexes  map[string]*index.TTLIndex    // ttl index name -> ttl index
 	txnMgr      *mvcc.TransactionManager
-	queryCache  *cache.LRUCache               // Query result cache
+	queryCache  *cache.LRUCache // Query result cache
 	mu          sync.RWMutex
 }
 
@@ -829,6 +829,68 @@ func (c *Collection) applyUpdate(doc *document.Document, update map[string]inter
 					}
 				}
 			}
+		} else if key == "$bit" {
+			// $bit operator - perform bitwise operations (and, or, xor)
+			if bitMap, ok := value.(map[string]interface{}); ok {
+				for field, operations := range bitMap {
+					if opMap, ok := operations.(map[string]interface{}); ok {
+						if currentVal, exists := doc.Get(field); exists {
+							if currentInt, ok := toInt64(currentVal); ok {
+								result := currentInt
+
+								// Apply bitwise AND
+								if andVal, hasAnd := opMap["and"]; hasAnd {
+									if andInt, ok := toInt64(andVal); ok {
+										result = result & andInt
+									}
+								}
+
+								// Apply bitwise OR
+								if orVal, hasOr := opMap["or"]; hasOr {
+									if orInt, ok := toInt64(orVal); ok {
+										result = result | orInt
+									}
+								}
+
+								// Apply bitwise XOR
+								if xorVal, hasXor := opMap["xor"]; hasXor {
+									if xorInt, ok := toInt64(xorVal); ok {
+										result = result ^ xorInt
+									}
+								}
+
+								doc.Set(field, result)
+							}
+						} else {
+							// Field doesn't exist, initialize to 0 and apply operations
+							result := int64(0)
+
+							// Apply bitwise AND
+							if andVal, hasAnd := opMap["and"]; hasAnd {
+								if andInt, ok := toInt64(andVal); ok {
+									result = result & andInt
+								}
+							}
+
+							// Apply bitwise OR
+							if orVal, hasOr := opMap["or"]; hasOr {
+								if orInt, ok := toInt64(orVal); ok {
+									result = result | orInt
+								}
+							}
+
+							// Apply bitwise XOR
+							if xorVal, hasXor := opMap["xor"]; hasXor {
+								if xorInt, ok := toInt64(xorVal); ok {
+									result = result ^ xorInt
+								}
+							}
+
+							doc.Set(field, result)
+						}
+					}
+				}
+			}
 		} else {
 			// Direct field update
 			doc.Set(key, value)
@@ -1410,10 +1472,14 @@ func (c *Collection) Stats() map[string]interface{} {
 	defer c.mu.RUnlock()
 
 	return map[string]interface{}{
-		"name":          c.name,
-		"count":         len(c.documents),
-		"indexes":       len(c.indexes),
-		"index_details": c.ListIndexes(),
+		"name":             c.name,
+		"count":            len(c.documents),
+		"indexes":          len(c.indexes),
+		"index_count":      len(c.indexes),
+		"text_index_count": len(c.textIndexes),
+		"geo_index_count":  len(c.geoIndexes),
+		"ttl_index_count":  len(c.ttlIndexes),
+		"index_details":    c.ListIndexes(),
 	}
 }
 
@@ -1573,6 +1639,19 @@ func toFloat64(v interface{}) (float64, bool) {
 		return float64(val), true
 	case int64:
 		return float64(val), true
+	default:
+		return 0, false
+	}
+}
+
+func toInt64(v interface{}) (int64, bool) {
+	switch val := v.(type) {
+	case int64:
+		return val, true
+	case int:
+		return int64(val), true
+	case float64:
+		return int64(val), true
 	default:
 		return 0, false
 	}

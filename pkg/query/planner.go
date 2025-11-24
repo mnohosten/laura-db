@@ -18,6 +18,21 @@ type QueryPlan struct {
 	FilterSteps   []string // Fields that still need filtering after index scan
 	IsCovered     bool     // True if query can be satisfied entirely from index
 	IndexedField  string   // The field covered by the index
+
+	// Index intersection support
+	UseIntersection bool                  // True if using multiple indexes
+	IntersectPlans  []*IndexIntersectPlan // Plans for each index in intersection
+}
+
+// IndexIntersectPlan represents a single index scan in an intersection
+type IndexIntersectPlan struct {
+	IndexName string
+	Index     *index.Index
+	Field     string
+	ScanType  ScanType
+	ScanKey   interface{} // For exact match
+	ScanStart interface{} // For range scans
+	ScanEnd   interface{} // For range scans
 }
 
 // ScanType represents the type of index scan
@@ -64,10 +79,23 @@ func (qp *QueryPlanner) Plan(q *Query) *QueryPlan {
 			// Use statistics to refine cost estimate
 			indexPlan.EstimatedCost = qp.estimateCostWithStats(indexPlan, idx)
 
+			// Choose index based on cost, but prefer indexes that eliminate more filters
+			// If costs are equal or close, prefer the one with fewer remaining filter steps
 			if indexPlan.EstimatedCost < bestPlan.EstimatedCost {
 				bestPlan = indexPlan
+			} else if indexPlan.EstimatedCost == bestPlan.EstimatedCost {
+				// Costs equal - prefer index that matches more fields
+				if len(indexPlan.FilterSteps) < len(bestPlan.FilterSteps) {
+					bestPlan = indexPlan
+				}
 			}
 		}
+	}
+
+	// Try index intersection if we have multiple conditions
+	intersectionPlan := qp.planIndexIntersection(q.filter)
+	if intersectionPlan != nil && intersectionPlan.EstimatedCost < bestPlan.EstimatedCost {
+		bestPlan = intersectionPlan
 	}
 
 	return bestPlan
@@ -410,7 +438,22 @@ func (plan *QueryPlan) Explain() map[string]interface{} {
 		"isCovered":     plan.IsCovered,
 	}
 
-	if plan.UseIndex {
+	if plan.UseIntersection {
+		result["scanType"] = "INDEX_INTERSECTION"
+		indexNames := make([]string, len(plan.IntersectPlans))
+		fields := make([]string, len(plan.IntersectPlans))
+		for i, ip := range plan.IntersectPlans {
+			indexNames[i] = ip.IndexName
+			fields[i] = ip.Field
+		}
+		result["indexes"] = indexNames
+		result["fields"] = fields
+		result["note"] = "Using multiple indexes with set intersection"
+
+		if len(plan.FilterSteps) > 0 {
+			result["additionalFilters"] = plan.FilterSteps
+		}
+	} else if plan.UseIndex {
 		result["indexName"] = plan.IndexName
 		result["indexedField"] = plan.IndexedField
 
@@ -443,4 +486,199 @@ func (plan *QueryPlan) Explain() map[string]interface{} {
 	}
 
 	return result
+}
+
+// planIndexIntersection attempts to create a plan using multiple indexes
+func (qp *QueryPlanner) planIndexIntersection(filter map[string]interface{}) *QueryPlan {
+	// Extract simple field conditions (no $and, $or for now)
+	fieldConditions := make(map[string]interface{})
+	for field, value := range filter {
+		if field != "$and" && field != "$or" && field != "$not" {
+			fieldConditions[field] = value
+		}
+	}
+
+	// Need at least 2 fields to consider intersection
+	if len(fieldConditions) < 2 {
+		return nil
+	}
+
+	// Find indexes that can be used for each field
+	intersectPlans := make([]*IndexIntersectPlan, 0)
+	usedFields := make([]string, 0)
+
+	for field, value := range fieldConditions {
+		// Try to find an index for this field
+		for indexName, idx := range qp.indexes {
+			// Skip compound indexes for now (simpler to use single-field indexes)
+			if idx.IsCompound() {
+				continue
+			}
+
+			// Check if this index matches the field
+			if idx.FieldPath() != field {
+				continue
+			}
+
+			// Analyze the condition
+			intersectPlan := qp.createIntersectPlan(indexName, idx, field, value)
+			if intersectPlan != nil {
+				intersectPlans = append(intersectPlans, intersectPlan)
+				usedFields = append(usedFields, field)
+				break // Found an index for this field
+			}
+		}
+	}
+
+	// Need at least 2 indexes to do intersection
+	if len(intersectPlans) < 2 {
+		return nil
+	}
+
+	// Estimate cost of intersection
+	// Cost = sum of index scans + intersection overhead
+	estimatedCost := qp.estimateIntersectionCost(intersectPlans)
+
+	// Find remaining filters (fields not covered by any index)
+	remainingFilters := make([]string, 0)
+	for field := range fieldConditions {
+		covered := false
+		for _, usedField := range usedFields {
+			if field == usedField {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			remainingFilters = append(remainingFilters, field)
+		}
+	}
+
+	return &QueryPlan{
+		UseIndex:        true,
+		UseIntersection: true,
+		IntersectPlans:  intersectPlans,
+		ScanType:        ScanTypeCollection, // Not used for intersection
+		EstimatedCost:   estimatedCost,
+		FilterSteps:     remainingFilters,
+		IsCovered:       false, // Intersection requires document fetch
+	}
+}
+
+// createIntersectPlan creates a plan for a single index in an intersection
+func (qp *QueryPlanner) createIntersectPlan(indexName string, idx *index.Index, field string, value interface{}) *IndexIntersectPlan {
+	plan := &IndexIntersectPlan{
+		IndexName: indexName,
+		Index:     idx,
+		Field:     field,
+	}
+
+	// Check if it's an operator expression
+	if operatorMap, ok := value.(map[string]interface{}); ok {
+		// Handle different operators
+		for opStr, opValue := range operatorMap {
+			switch opStr {
+			case "$eq":
+				plan.ScanType = ScanTypeIndexExact
+				plan.ScanKey = opValue
+				return plan
+
+			case "$gt", "$gte":
+				plan.ScanType = ScanTypeIndexRange
+				if opStr == "$gte" {
+					plan.ScanStart = opValue
+				} else {
+					plan.ScanStart = opValue
+				}
+				return plan
+
+			case "$lt", "$lte":
+				plan.ScanType = ScanTypeIndexRange
+				if opStr == "$lte" {
+					plan.ScanEnd = opValue
+				} else {
+					plan.ScanEnd = opValue
+				}
+				return plan
+
+			default:
+				// Unsupported operator for intersection
+				return nil
+			}
+		}
+	}
+
+	// Direct value comparison (implicit $eq)
+	plan.ScanType = ScanTypeIndexExact
+	plan.ScanKey = value
+	return plan
+}
+
+// estimateIntersectionCost estimates the cost of using index intersection
+func (qp *QueryPlanner) estimateIntersectionCost(plans []*IndexIntersectPlan) int {
+	if len(plans) == 0 {
+		return 1000000
+	}
+
+	// Get statistics for each index
+	costs := make([]int, len(plans))
+	cardinalities := make([]int, len(plans))
+
+	for i, plan := range plans {
+		stats := plan.Index.GetStatistics()
+		totalEntries, uniqueKeys, _, _, isStale := stats.GetStats()
+
+		if isStale {
+			// Use default estimates if stats are stale
+			costs[i] = 100
+			cardinalities[i] = 100
+			continue
+		}
+
+		// Estimate cardinality (number of results) from this index scan
+		switch plan.ScanType {
+		case ScanTypeIndexExact:
+			// Exact match - estimate based on uniqueness
+			if uniqueKeys > 0 {
+				cardinalities[i] = totalEntries / uniqueKeys
+			} else {
+				cardinalities[i] = totalEntries
+			}
+			costs[i] = 5 // Low cost for exact lookup
+
+		case ScanTypeIndexRange:
+			// Range scan - estimate 30% of total entries
+			cardinalities[i] = int(float64(totalEntries) * 0.3)
+			costs[i] = cardinalities[i] / 10 // Cost proportional to results
+			if costs[i] < 10 {
+				costs[i] = 10
+			}
+
+		default:
+			cardinalities[i] = totalEntries
+			costs[i] = 100
+		}
+	}
+
+	// Total cost = sum of index scans + intersection overhead
+	totalScanCost := 0
+	for _, cost := range costs {
+		totalScanCost += cost
+	}
+
+	// Intersection overhead = size of smallest result set (we intersect sets)
+	minCardinality := cardinalities[0]
+	for _, card := range cardinalities {
+		if card < minCardinality {
+			minCardinality = card
+		}
+	}
+
+	// Add overhead for set operations
+	intersectionOverhead := minCardinality / 2
+	if intersectionOverhead < 5 {
+		intersectionOverhead = 5
+	}
+
+	return totalScanCost + intersectionOverhead
 }

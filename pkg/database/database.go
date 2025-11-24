@@ -106,6 +106,34 @@ func (db *Database) DropCollection(name string) error {
 	return nil
 }
 
+// RenameCollection renames a collection
+func (db *Database) RenameCollection(oldName, newName string) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	if !db.isOpen {
+		return fmt.Errorf("database is closed")
+	}
+
+	// Check if old collection exists
+	coll, exists := db.collections[oldName]
+	if !exists {
+		return fmt.Errorf("collection %s does not exist", oldName)
+	}
+
+	// Check if new collection name already exists
+	if _, exists := db.collections[newName]; exists {
+		return fmt.Errorf("collection %s already exists", newName)
+	}
+
+	// Rename the collection
+	coll.name = newName
+	db.collections[newName] = coll
+	delete(db.collections, oldName)
+
+	return nil
+}
+
 // ListCollections returns all collection names
 func (db *Database) ListCollections() []string {
 	db.mu.RLock()

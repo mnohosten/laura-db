@@ -2,7 +2,7 @@
 
 An educational implementation of a MongoDB-like document database in Go.
 
-LauraDB is a fast, embedded document database with a REST API and web-based admin console.
+LauraDB is a fast, embedded document database with an interactive CLI tool and a complete HTTP server with web-based admin console.
 
 ## Overview
 
@@ -47,6 +47,10 @@ This project demonstrates how to build a production-grade document database from
   - Statistics tracking: Cardinality, selectivity, min/max values
   - Intelligent index selection: Chooses best index based on query cost estimation
   - Covered query detection: Query satisfied entirely from index
+- **Parallel execution**: Multi-core query processing ✨ **NEW**
+  - Up to 4.36x speedup on large datasets (50k+ documents)
+  - Configurable worker count and chunk size
+  - Automatic threshold-based activation
 - **Projection**: Field selection and exclusion
 
 #### 6. Query Cache (`pkg/cache`)
@@ -80,9 +84,10 @@ This project demonstrates how to build a production-grade document database from
 
 ### Access Modes
 
-1. **Embedded/Library Mode**: Import package directly in Go applications
-2. **HTTP Server Mode**: RESTful API server for language-agnostic access
-3. **Client-Server Mode**: Standalone server with custom binary protocol
+1. **Embedded/Library Mode**: Import package directly in Go applications ✅ **Available**
+2. **CLI Mode**: Interactive command-line interface (REPL) for database administration ✅ **Available**
+3. **HTTP Server Mode**: RESTful API server with web-based admin console ✅ **Available**
+4. **Client-Server Mode**: Standalone server with custom binary protocol ⚠️ **Not Yet Implemented**
 
 ## Project Structure
 
@@ -100,6 +105,7 @@ laura-db/
 │   ├── cache/           # LRU query cache with TTL
 │   ├── aggregation/     # Aggregation pipeline
 │   ├── database/        # Main database interface
+│   ├── impex/           # Import/export utilities (JSON, CSV)
 │   ├── server/          # HTTP server and handlers
 │   └── protocol/        # Network protocol
 ├── client/              # Client library for remote access
@@ -172,15 +178,15 @@ Start the HTTP server with a RESTful API and web-based admin console:
 
 ```bash
 # Build server
-go build -o server ./cmd/server/main.go
+make server
 
 # Start server
-./server -port 8080 -data-dir ./data
+./bin/laura-server -port 8080 -data-dir ./data
 ```
 
 **Access the Admin Console:**
 
-Open your browser to http://localhost:8080/admin/
+Open your browser to http://localhost:8080/
 
 The admin console provides a Kibana-like interface with:
 - **Console**: Interactive query editor with syntax highlighting
@@ -272,18 +278,131 @@ Collection statistics for 'users': {...}
 
 See [CLI documentation](cmd/laura-cli/README.md) for complete command reference.
 
+### Import/Export Utilities
+
+LauraDB provides utilities to import and export data in JSON and CSV formats:
+
+```go
+import (
+    "github.com/mnohosten/laura-db/pkg/database"
+    "github.com/mnohosten/laura-db/pkg/impex"
+    "os"
+)
+
+// Export to JSON
+db := database.Open(database.DefaultConfig("./data"))
+coll := db.Collection("users")
+docs, _ := coll.Find(map[string]interface{}{})
+
+jsonFile, _ := os.Create("users.json")
+defer jsonFile.Close()
+impex.Export(jsonFile, docs, impex.FormatJSON, map[string]interface{}{
+    "pretty": true,  // Enable pretty-printing
+})
+
+// Export to CSV (specific fields)
+csvFile, _ := os.Create("users.csv")
+defer csvFile.Close()
+impex.Export(csvFile, docs, impex.FormatCSV, map[string]interface{}{
+    "fields": []string{"name", "age", "email"},
+})
+
+// Import from JSON
+jsonFile, _ = os.Open("users.json")
+defer jsonFile.Close()
+importedDocs, _ := impex.Import(jsonFile, impex.FormatJSON, nil)
+
+// Import from CSV
+csvFile, _ = os.Open("users.csv")
+defer csvFile.Close()
+importedDocs, _ = impex.Import(csvFile, impex.FormatCSV, nil)
+```
+
+**Features:**
+- **JSON Export**: Pretty-printing support, preserves all data types
+- **CSV Export**: Field selection or auto-detection, handles complex types
+- **JSON Import**: Smart type parsing (ObjectID, time.Time, nested structures)
+- **CSV Import**: Automatic type detection (int64, float64, bool, string)
+- **Round-trip Support**: Data integrity maintained through export/import cycles
+
+See [examples/import-export](examples/import-export) for a complete working example.
+
 ### Binary Protocol Server Mode
 
+> **⚠️ NOTE: The binary protocol server is currently NOT IMPLEMENTED.**
+>
+> The custom binary protocol (`pkg/protocol`) and client-server mode have not been built yet. See TODO.md for implementation status.
+
 ```bash
-# Start server
+# Start server (NOT YET AVAILABLE)
 ./bin/server --data-dir ./data --port 27018
 
-# Use CLI client
+# Use CLI client (NOT YET AVAILABLE)
 ./bin/cli --host localhost:27018
 > use mydb
 > db.users.insertOne({"name": "Alice", "age": 25})
 > db.users.find({"age": {"$gte": 18}})
 ```
+
+## Testing and Benchmarking
+
+LauraDB includes comprehensive testing and performance benchmarking systems.
+
+### Running Tests
+
+```bash
+# Run all tests
+make test
+
+# Run tests with coverage
+make test-coverage
+
+# Generate HTML coverage report
+make coverage-html
+
+# Run with race detector
+go test -race ./pkg/...
+```
+
+**Test Coverage:** 72.9% overall with 76+ passing tests across all packages.
+
+### Performance Benchmarking
+
+LauraDB includes automated performance benchmarking to track performance and detect regressions.
+
+```bash
+# Run all benchmarks
+make bench-all
+
+# Create performance baseline
+make bench-baseline
+
+# Check for regressions against baseline
+make bench-check
+
+# Compare two benchmark results
+make bench-compare OLD=old.txt NEW=new.txt
+```
+
+**Key Features:**
+- 📊 Automated CI/CD benchmarking on every PR and push
+- 📈 Historical performance tracking on main branch
+- 🔍 Statistical comparison with `benchstat`
+- 📝 Automatic benchmark result comments on PRs
+- 🎯 Daily scheduled benchmark runs
+- 📦 90-365 day artifact retention
+
+**Benchmark Coverage:**
+- Collection operations (insert, find, update, delete)
+- B+ tree index operations
+- Query execution and optimization
+- Query cache performance
+- Parallel query execution
+- Text search and geospatial queries
+- Storage engine operations
+- MVCC transaction processing
+
+See [docs/benchmarking.md](docs/benchmarking.md) for comprehensive benchmarking documentation.
 
 ## Implementation Roadmap
 

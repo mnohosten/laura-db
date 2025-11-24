@@ -1,0 +1,164 @@
+name: Performance Benchmarks
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  schedule:
+    # Run benchmarks daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch: # Allow manual triggering
+
+jobs:
+  benchmark:
+    name: Run Performance Benchmarks
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Full history for comparison
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.21'
+
+    - name: Cache Go modules
+      uses: actions/cache@v4
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Run benchmarks
+      run: |
+        echo "Running performance benchmarks..."
+        go test -bench=. -benchmem -benchtime=3s -run=^$ ./pkg/... > benchmark-results.txt 2>&1 || true
+
+    - name: Display benchmark results
+      run: |
+        echo "=== Benchmark Results ==="
+        cat benchmark-results.txt
+
+    - name: Extract benchmark summary
+      run: |
+        echo "=== Benchmark Summary ==="
+        grep -E "^Benchmark" benchmark-results.txt | head -20 || echo "No benchmark results found"
+
+    - name: Check for performance regressions
+      run: |
+        # This is a placeholder for future regression detection
+        # In a full implementation, this would compare against baseline results
+        echo "Checking for performance regressions..."
+        echo "✓ Benchmark check complete (regression detection coming soon)"
+
+    - name: Upload benchmark results
+      uses: actions/upload-artifact@v4
+      with:
+        name: benchmark-results-${{ github.sha }}
+        path: benchmark-results.txt
+        retention-days: 90
+
+    - name: Comment benchmark results on PR
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v7
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        script: |
+          const fs = require('fs');
+          const results = fs.readFileSync('benchmark-results.txt', 'utf8');
+
+          // Extract key benchmarks (first 30 lines of benchmark output)
+          const lines = results.split('\n');
+          const benchmarkLines = lines.filter(l => l.startsWith('Benchmark'));
+          const summary = benchmarkLines.slice(0, 30).join('\n');
+
+          if (summary) {
+            const body = `## 📊 Performance Benchmark Results
+
+\`\`\`
+${summary}
+${benchmarkLines.length > 30 ? `\n... and ${benchmarkLines.length - 30} more benchmarks` : ''}
+\`\`\`
+
+<details>
+<summary>View full results</summary>
+
+\`\`\`
+${results.slice(0, 10000)}
+${results.length > 10000 ? '\n... (truncated, see artifacts for full results)' : ''}
+\`\`\`
+
+</details>
+
+Download the full benchmark report from the workflow artifacts.
+`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+          }
+
+  continuous-benchmarking:
+    name: Continuous Benchmark Tracking
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.21'
+
+    - name: Run benchmarks with benchstat format
+      run: |
+        mkdir -p benchmarks
+        go test -bench=. -benchmem -benchtime=3s -count=5 -run=^$ ./pkg/... > benchmarks/current.txt 2>&1 || true
+
+    - name: Store benchmark results
+      run: |
+        # Create timestamped benchmark file
+        TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+        COMMIT_SHA=$(git rev-parse --short HEAD)
+        cp benchmarks/current.txt "benchmarks/bench-${TIMESTAMP}-${COMMIT_SHA}.txt"
+        echo "Stored benchmark results: bench-${TIMESTAMP}-${COMMIT_SHA}.txt"
+
+    - name: Upload benchmark history
+      uses: actions/upload-artifact@v4
+      with:
+        name: benchmark-history-${{ github.sha }}
+        path: benchmarks/
+        retention-days: 365
+
+    - name: Generate benchmark report
+      run: |
+        echo "=== LauraDB Performance Benchmarks ===" > benchmark-report.md
+        echo "" >> benchmark-report.md
+        echo "Commit: $(git rev-parse --short HEAD)" >> benchmark-report.md
+        echo "Date: $(date)" >> benchmark-report.md
+        echo "" >> benchmark-report.md
+        echo "## Key Performance Metrics" >> benchmark-report.md
+        echo "" >> benchmark-report.md
+        echo "\`\`\`" >> benchmark-report.md
+        grep -E "^Benchmark" benchmarks/current.txt | head -50 >> benchmark-report.md || echo "No results"
+        echo "\`\`\`" >> benchmark-report.md
+
+    - name: Upload report
+      uses: actions/upload-artifact@v4
+      with:
+        name: benchmark-report-${{ github.sha }}
+        path: benchmark-report.md
+        retention-days: 90

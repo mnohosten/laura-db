@@ -9,7 +9,8 @@ import (
 )
 
 func main() {
-	fmt.Println("=== Document Database Demo ===\n")
+	fmt.Println("=== Document Database Demo ===")
+	fmt.Println()
 
 	// Open database
 	config := database.DefaultConfig("./demo_data")

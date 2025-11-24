@@ -180,3 +180,24 @@ func (vs *VersionStore) GetVersionCount(key string) int {
 	}
 	return count
 }
+
+// GetLatestVersion returns the latest version number for a key
+// Returns 0 if the key doesn't exist
+func (vs *VersionStore) GetLatestVersion(key string) uint64 {
+	vs.mu.RLock()
+	chain, exists := vs.data[key]
+	vs.mu.RUnlock()
+
+	if !exists {
+		return 0
+	}
+
+	chain.mu.RLock()
+	defer chain.mu.RUnlock()
+
+	if chain.Head == nil {
+		return 0
+	}
+
+	return chain.Head.Value.Version
+}

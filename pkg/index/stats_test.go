@@ -344,3 +344,253 @@ func TestCompoundIndexStats(t *testing.T) {
 		t.Errorf("Expected field_paths [city, age], got %v", fieldPaths)
 	}
 }
+
+// Histogram tests
+
+func TestBuildHistogram(t *testing.T) {
+	// Test with integer values
+	values := make([]interface{}, 100)
+	for i := 0; i < 100; i++ {
+		values[i] = int64(i)
+	}
+
+	histogram := BuildHistogram(values, 10)
+	if histogram == nil {
+		t.Fatal("Expected histogram to be created")
+	}
+
+	if histogram.NumBuckets != 10 {
+		t.Errorf("Expected 10 buckets, got %d", histogram.NumBuckets)
+	}
+
+	// Verify total frequency sums to 1.0
+	totalFreq := 0.0
+	for _, bucket := range histogram.Buckets {
+		totalFreq += bucket.Frequency
+	}
+
+	if totalFreq < 0.99 || totalFreq > 1.01 {
+		t.Errorf("Expected total frequency ~1.0, got %f", totalFreq)
+	}
+}
+
+func TestBuildHistogramUniformDistribution(t *testing.T) {
+	// Test with uniform distribution
+	values := make([]interface{}, 1000)
+	for i := 0; i < 1000; i++ {
+		values[i] = int64(i)
+	}
+
+	histogram := BuildHistogram(values, 10)
+
+	// With uniform distribution, each bucket should have ~0.1 frequency
+	for i, bucket := range histogram.Buckets {
+		// Allow some tolerance for rounding
+		if bucket.Frequency < 0.09 || bucket.Frequency > 0.11 {
+			t.Errorf("Bucket %d: expected frequency ~0.1, got %f", i, bucket.Frequency)
+		}
+	}
+}
+
+func TestBuildHistogramSkewedDistribution(t *testing.T) {
+	// Test with skewed distribution (most values near 0)
+	values := make([]interface{}, 1000)
+	for i := 0; i < 900; i++ {
+		values[i] = int64(i % 10) // 0-9
+	}
+	for i := 900; i < 1000; i++ {
+		values[i] = int64(50 + (i % 50)) // 50-99
+	}
+
+	histogram := BuildHistogram(values, 10)
+
+	// First bucket should have much higher frequency
+	if histogram.Buckets[0].Frequency < 0.5 {
+		t.Errorf("First bucket should have high frequency for skewed distribution, got %f",
+			histogram.Buckets[0].Frequency)
+	}
+}
+
+func TestEstimateRangeSelectivityWithHistogram(t *testing.T) {
+	stats := NewIndexStats()
+
+	// Create data: values from 0 to 99
+	values := make([]interface{}, 100)
+	for i := 0; i < 100; i++ {
+		values[i] = int64(i)
+	}
+
+	// Build histogram
+	histogram := BuildHistogram(values, 10)
+	stats.SetHistogram(histogram)
+	stats.SetStats(100, 100, int64(0), int64(99))
+
+	// Test range [0, 10) - should be ~10% selective
+	selectivity := stats.EstimateRangeSelectivity(int64(0), int64(10))
+	if selectivity < 0.08 || selectivity > 0.12 {
+		t.Errorf("Expected selectivity ~0.1 for range [0, 10), got %f", selectivity)
+	}
+
+	// Test range [0, 50) - should be ~50% selective
+	selectivity = stats.EstimateRangeSelectivity(int64(0), int64(50))
+	if selectivity < 0.48 || selectivity > 0.52 {
+		t.Errorf("Expected selectivity ~0.5 for range [0, 50), got %f", selectivity)
+	}
+
+	// Test range [0, 100) - should be ~100% selective
+	selectivity = stats.EstimateRangeSelectivity(int64(0), int64(100))
+	if selectivity < 0.98 || selectivity > 1.0 {
+		t.Errorf("Expected selectivity ~1.0 for range [0, 100), got %f", selectivity)
+	}
+}
+
+func TestEstimateRangeSelectivityWithoutHistogram(t *testing.T) {
+	stats := NewIndexStats()
+	stats.SetStats(100, 100, int64(0), int64(99))
+
+	// Without histogram, should use min/max estimation
+	// Range [0, 50) is 50/99 ~= 0.505
+	selectivity := stats.EstimateRangeSelectivity(int64(0), int64(50))
+	if selectivity < 0.48 || selectivity > 0.52 {
+		t.Errorf("Expected selectivity ~0.5 for range [0, 50), got %f", selectivity)
+	}
+}
+
+func TestEstimateRangeSelectivityPartialBucketOverlap(t *testing.T) {
+	stats := NewIndexStats()
+
+	// Create data from 0 to 99
+	values := make([]interface{}, 100)
+	for i := 0; i < 100; i++ {
+		values[i] = int64(i)
+	}
+
+	histogram := BuildHistogram(values, 10)
+	stats.SetHistogram(histogram)
+	stats.SetStats(100, 100, int64(0), int64(99))
+
+	// Test range [5, 15) - overlaps two buckets partially
+	selectivity := stats.EstimateRangeSelectivity(int64(5), int64(15))
+
+	// Should be approximately 10/100 = 0.1
+	if selectivity < 0.08 || selectivity > 0.12 {
+		t.Errorf("Expected selectivity ~0.1 for range [5, 15), got %f", selectivity)
+	}
+}
+
+func TestBuildHistogramSameValues(t *testing.T) {
+	// All values are the same
+	values := make([]interface{}, 100)
+	for i := 0; i < 100; i++ {
+		values[i] = int64(42)
+	}
+
+	histogram := BuildHistogram(values, 10)
+
+	// Should create 1 bucket with all values
+	if histogram.NumBuckets != 1 {
+		t.Errorf("Expected 1 bucket for same values, got %d", histogram.NumBuckets)
+	}
+
+	if histogram.Buckets[0].Frequency != 1.0 {
+		t.Errorf("Expected frequency 1.0 for single bucket, got %f",
+			histogram.Buckets[0].Frequency)
+	}
+}
+
+func TestBuildHistogramEmptyValues(t *testing.T) {
+	histogram := BuildHistogram([]interface{}{}, 10)
+	if histogram != nil {
+		t.Error("Expected nil histogram for empty values")
+	}
+}
+
+func TestBuildHistogramNonNumericValues(t *testing.T) {
+	values := []interface{}{"a", "b", "c"}
+	histogram := BuildHistogram(values, 10)
+	if histogram != nil {
+		t.Error("Expected nil histogram for non-numeric values")
+	}
+}
+
+func TestEstimateRangeSelectivityInvalidRange(t *testing.T) {
+	stats := NewIndexStats()
+	stats.SetStats(100, 100, int64(0), int64(99))
+
+	// Invalid range (end < start)
+	selectivity := stats.EstimateRangeSelectivity(int64(50), int64(10))
+	if selectivity != 0.0 {
+		t.Errorf("Expected selectivity 0.0 for invalid range, got %f", selectivity)
+	}
+}
+
+func TestToComparable(t *testing.T) {
+	tests := []struct {
+		input    interface{}
+		expected float64
+		ok       bool
+	}{
+		{int(42), 42.0, true},
+		{int64(42), 42.0, true},
+		{float64(42.5), 42.5, true},
+		{int32(42), 42.0, true},
+		{"string", 0, false},
+		{true, 0, false},
+	}
+
+	for _, test := range tests {
+		result, ok := toComparable(test.input)
+		if ok != test.ok {
+			t.Errorf("toComparable(%v): expected ok=%v, got ok=%v",
+				test.input, test.ok, ok)
+		}
+		if ok && result != test.expected {
+			t.Errorf("toComparable(%v): expected %v, got %v",
+				test.input, test.expected, result)
+		}
+	}
+}
+
+// Benchmark histogram-based estimation
+func BenchmarkEstimateRangeSelectivityWithHistogram(b *testing.B) {
+	stats := NewIndexStats()
+
+	// Create uniformly distributed data
+	values := make([]interface{}, 10000)
+	for i := 0; i < 10000; i++ {
+		values[i] = int64(i)
+	}
+
+	histogram := BuildHistogram(values, 100)
+	stats.SetHistogram(histogram)
+	stats.SetStats(10000, 10000, int64(0), int64(9999))
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		stats.EstimateRangeSelectivity(int64(1000), int64(5000))
+	}
+}
+
+// Benchmark min/max-based estimation
+func BenchmarkEstimateRangeSelectivityWithoutHistogram(b *testing.B) {
+	stats := NewIndexStats()
+	stats.SetStats(10000, 10000, int64(0), int64(9999))
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		stats.EstimateRangeSelectivity(int64(1000), int64(5000))
+	}
+}
+
+// Benchmark histogram building
+func BenchmarkBuildHistogram(b *testing.B) {
+	values := make([]interface{}, 10000)
+	for i := 0; i < 10000; i++ {
+		values[i] = int64(i)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		BuildHistogram(values, 100)
+	}
+}

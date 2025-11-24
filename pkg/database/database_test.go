@@ -1,6 +1,7 @@
 package database
 
 import (
+	"fmt"
 	"os"
 	"testing"
 
@@ -450,5 +451,240 @@ func TestDropCollection(t *testing.T) {
 	collections := db.ListCollections()
 	if len(collections) != 0 {
 		t.Errorf("Expected 0 collections after drop, got %d", len(collections))
+	}
+}
+
+func TestCreateCollection(t *testing.T) {
+	dir := "./test_db_create_coll"
+	defer os.RemoveAll(dir)
+
+	db, _ := Open(DefaultConfig(dir))
+	defer db.Close()
+
+	// Create a new collection
+	coll, err := db.CreateCollection("users")
+	if err != nil {
+		t.Fatalf("CreateCollection failed: %v", err)
+	}
+
+	if coll == nil {
+		t.Fatal("Expected non-nil collection")
+	}
+
+	if coll.Name() != "users" {
+		t.Errorf("Expected collection name 'users', got %s", coll.Name())
+	}
+
+	// Try to create duplicate collection
+	_, err = db.CreateCollection("users")
+	if err == nil {
+		t.Error("Expected error when creating duplicate collection")
+	}
+}
+
+func TestRenameCollection(t *testing.T) {
+	dir := "./test_db_rename_coll"
+	defer os.RemoveAll(dir)
+
+	db, _ := Open(DefaultConfig(dir))
+	defer db.Close()
+
+	// Create and populate collection
+	users := db.Collection("users")
+	users.InsertOne(map[string]interface{}{"name": "Alice"})
+
+	// Rename collection
+	err := db.RenameCollection("users", "people")
+	if err != nil {
+		t.Fatalf("RenameCollection failed: %v", err)
+	}
+
+	// Verify old name doesn't exist
+	collections := db.ListCollections()
+	for _, name := range collections {
+		if name == "users" {
+			t.Error("Old collection name still exists")
+		}
+	}
+
+	// Verify new name exists and has data
+	people := db.Collection("people")
+	count, _ := people.Count(map[string]interface{}{})
+	if count != 1 {
+		t.Errorf("Expected 1 document in renamed collection, got %d", count)
+	}
+
+	// Test renaming non-existent collection
+	err = db.RenameCollection("nonexistent", "other")
+	if err == nil {
+		t.Error("Expected error when renaming non-existent collection")
+	}
+
+	// Test renaming to existing name
+	db.Collection("existing")
+	err = db.RenameCollection("people", "existing")
+	if err == nil {
+		t.Error("Expected error when renaming to existing collection name")
+	}
+}
+
+func TestTransactionMethods(t *testing.T) {
+	dir := "./test_db_transactions"
+	defer os.RemoveAll(dir)
+
+	db, _ := Open(DefaultConfig(dir))
+	defer db.Close()
+
+	// Test BeginTransaction
+	txn := db.BeginTransaction()
+	if txn == nil {
+		t.Fatal("Expected non-nil transaction")
+	}
+
+	// Test CommitTransaction
+	err := db.CommitTransaction(txn)
+	if err != nil {
+		t.Fatalf("CommitTransaction failed: %v", err)
+	}
+
+	// Test AbortTransaction
+	txn2 := db.BeginTransaction()
+	err = db.AbortTransaction(txn2)
+	if err != nil {
+		t.Fatalf("AbortTransaction failed: %v", err)
+	}
+}
+
+func TestDatabaseStats(t *testing.T) {
+	dir := "./test_db_stats"
+	defer os.RemoveAll(dir)
+
+	db, _ := Open(DefaultConfig(dir))
+	defer db.Close()
+
+	// Create collections and add data
+	users := db.Collection("users")
+	users.InsertOne(map[string]interface{}{"name": "Alice"})
+	users.InsertOne(map[string]interface{}{"name": "Bob"})
+
+	products := db.Collection("products")
+	products.InsertOne(map[string]interface{}{"name": "Widget"})
+
+	// Get stats
+	stats := db.Stats()
+	if stats == nil {
+		t.Fatal("Expected non-nil stats")
+	}
+
+	// Verify stats structure
+	if stats["name"] != "default" {
+		t.Errorf("Expected database name 'default', got %v", stats["name"])
+	}
+
+	collections, ok := stats["collections"].(int)
+	if !ok || collections != 2 {
+		t.Errorf("Expected 2 collections, got %v", stats["collections"])
+	}
+
+	if stats["collection_stats"] == nil {
+		t.Error("Expected collection_stats in stats")
+	}
+
+	if stats["active_transactions"] == nil {
+		t.Error("Expected active_transactions in stats")
+	}
+
+	if stats["storage_stats"] == nil {
+		t.Error("Expected storage_stats in stats")
+	}
+}
+
+func TestAnalyze(t *testing.T) {
+	dir := "./test_db_analyze"
+	defer os.RemoveAll(dir)
+
+	db, _ := Open(DefaultConfig(dir))
+	defer db.Close()
+
+	users := db.Collection("users")
+
+	// Insert test data
+	for i := 0; i < 100; i++ {
+		users.InsertOne(map[string]interface{}{
+			"name": fmt.Sprintf("User%d", i),
+			"age":  int64(20 + (i % 50)),
+		})
+	}
+
+	// Create index
+	users.CreateIndex("age", false)
+
+	// Run analyze (no return value)
+	users.Analyze()
+
+	// Verify index statistics were updated
+	indexes := users.ListIndexes()
+	if len(indexes) == 0 {
+		t.Fatal("Expected at least one index")
+	}
+
+	// Find the age index in the list
+	var ageIndexFound bool
+	for _, idx := range indexes {
+		if field, ok := idx["field_path"].(string); ok && field == "age" {
+			ageIndexFound = true
+			// Check that size is present (btree size)
+			if _, ok := idx["size"]; !ok {
+				t.Error("Expected size in index stats")
+			}
+			break
+		}
+	}
+
+	if !ageIndexFound {
+		t.Error("Expected to find age index in list")
+	}
+}
+
+func TestExplain(t *testing.T) {
+	dir := "./test_db_explain"
+	defer os.RemoveAll(dir)
+
+	db, _ := Open(DefaultConfig(dir))
+	defer db.Close()
+
+	users := db.Collection("users")
+
+	// Insert test data
+	users.InsertOne(map[string]interface{}{"name": "Alice", "age": int64(30)})
+	users.InsertOne(map[string]interface{}{"name": "Bob", "age": int64(25)})
+
+	// Create index
+	users.CreateIndex("age", false)
+
+	// Explain query
+	explanation := users.Explain(map[string]interface{}{
+		"age": map[string]interface{}{"$gte": int64(25)},
+	})
+
+	if explanation == nil {
+		t.Fatal("Expected non-nil explanation")
+	}
+
+	// Verify explanation structure (matches QueryPlan.Explain output)
+	if explanation["estimatedCost"] == nil {
+		t.Error("Expected estimatedCost in explanation")
+	}
+
+	if explanation["useIndex"] == nil {
+		t.Error("Expected useIndex in explanation")
+	}
+
+	if explanation["collection"] == nil {
+		t.Error("Expected collection in explanation")
+	}
+
+	if explanation["totalDocuments"] == nil {
+		t.Error("Expected totalDocuments in explanation")
 	}
 }

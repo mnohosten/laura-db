@@ -1,0 +1,169 @@
+{
+  "dashboard": {
+    "title": "LauraDB Monitoring",
+    "tags": ["lauradb", "database"],
+    "timezone": "browser",
+    "panels": [
+      {
+        "title": "Query Rate",
+        "targets": [
+          {
+            "expr": "rate(laura_db_queries_total[1m])",
+            "legendFormat": "Queries/sec"
+          }
+        ],
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+      },
+      {
+        "title": "Operation Success Rate",
+        "targets": [
+          {
+            "expr": "(rate(laura_db_queries_total[1m]) - rate(laura_db_queries_failed_total[1m])) / rate(laura_db_queries_total[1m]) * 100",
+            "legendFormat": "Query Success %"
+          },
+          {
+            "expr": "(rate(laura_db_inserts_total[1m]) - rate(laura_db_inserts_failed_total[1m])) / rate(laura_db_inserts_total[1m]) * 100",
+            "legendFormat": "Insert Success %"
+          }
+        ],
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+      },
+      {
+        "title": "Query Latency Percentiles",
+        "targets": [
+          {
+            "expr": "laura_db_query_duration_seconds_p50",
+            "legendFormat": "P50"
+          },
+          {
+            "expr": "laura_db_query_duration_seconds_p95",
+            "legendFormat": "P95"
+          },
+          {
+            "expr": "laura_db_query_duration_seconds_p99",
+            "legendFormat": "P99"
+          }
+        ],
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}
+      },
+      {
+        "title": "Cache Performance",
+        "targets": [
+          {
+            "expr": "laura_db_cache_hit_rate * 100",
+            "legendFormat": "Hit Rate %"
+          },
+          {
+            "expr": "rate(laura_db_cache_hits_total[1m])",
+            "legendFormat": "Hits/sec"
+          },
+          {
+            "expr": "rate(laura_db_cache_misses_total[1m])",
+            "legendFormat": "Misses/sec"
+          }
+        ],
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}
+      },
+      {
+        "title": "Memory Usage",
+        "targets": [
+          {
+            "expr": "laura_db_memory_heap_bytes / 1024 / 1024",
+            "legendFormat": "Heap MB"
+          },
+          {
+            "expr": "laura_db_memory_stack_bytes / 1024 / 1024",
+            "legendFormat": "Stack MB"
+          }
+        ],
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16}
+      },
+      {
+        "title": "Active Connections",
+        "targets": [
+          {
+            "expr": "laura_db_active_connections",
+            "legendFormat": "Active"
+          }
+        ],
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16}
+      },
+      {
+        "title": "Transaction Metrics",
+        "targets": [
+          {
+            "expr": "rate(laura_db_transactions_committed_total[1m])",
+            "legendFormat": "Commits/sec"
+          },
+          {
+            "expr": "rate(laura_db_transactions_aborted_total[1m])",
+            "legendFormat": "Aborts/sec"
+          }
+        ],
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24}
+      },
+      {
+        "title": "Index Usage",
+        "targets": [
+          {
+            "expr": "laura_db_index_usage_rate * 100",
+            "legendFormat": "Index Usage %"
+          },
+          {
+            "expr": "rate(laura_db_index_scans_total[1m])",
+            "legendFormat": "Index Scans/sec"
+          },
+          {
+            "expr": "rate(laura_db_collection_scans_total[1m])",
+            "legendFormat": "Collection Scans/sec"
+          }
+        ],
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24}
+      },
+      {
+        "title": "I/O Throughput",
+        "targets": [
+          {
+            "expr": "rate(laura_db_io_bytes_read_total[1m]) / 1024",
+            "legendFormat": "Read KB/s"
+          },
+          {
+            "expr": "rate(laura_db_io_bytes_written_total[1m]) / 1024",
+            "legendFormat": "Write KB/s"
+          }
+        ],
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32}
+      },
+      {
+        "title": "Goroutines & GC",
+        "targets": [
+          {
+            "expr": "laura_db_goroutines",
+            "legendFormat": "Goroutines"
+          },
+          {
+            "expr": "rate(laura_db_gc_runs_total[1m])",
+            "legendFormat": "GC Runs/sec"
+          }
+        ],
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 32}
+      }
+    ],
+    "refresh": "5s",
+    "time": {
+      "from": "now-15m",
+      "to": "now"
+    },
+    "version": 1
+  }
+}

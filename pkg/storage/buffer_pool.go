@@ -37,12 +37,36 @@ func NewBufferPool(capacity int, diskMgr *DiskManager) *BufferPool {
 
 // FetchPage retrieves a page from the buffer pool or disk
 func (bp *BufferPool) FetchPage(pageID PageID) (*Page, error) {
-	bp.mu.Lock()
+	// Fast path: check if page is already in buffer pool (read lock)
+	bp.mu.RLock()
+	if _, exists := bp.pages[pageID]; exists {
+		// Upgrade to write lock for LRU update
+		bp.mu.RUnlock()
+		bp.mu.Lock()
+
+		// Double-check page still exists after lock upgrade
+		if frame, exists := bp.pages[pageID]; exists {
+			// Move to front of LRU list (most recently used)
+			bp.lruList.MoveToFront(frame.lruNode)
+			frame.page.Pin()
+			bp.hits++
+			bp.mu.Unlock()
+			return frame.page, nil
+		}
+		bp.mu.Unlock()
+
+		// Page was evicted between locks, fall through to slow path
+		bp.mu.Lock()
+	} else {
+		// Upgrade to write lock for disk read and insertion
+		bp.mu.RUnlock()
+		bp.mu.Lock()
+	}
 	defer bp.mu.Unlock()
 
-	// Check if page is in buffer pool
+	// Slow path: page not in pool - need to fetch from disk
+	// Double-check after acquiring write lock
 	if frame, exists := bp.pages[pageID]; exists {
-		// Move to front of LRU list (most recently used)
 		bp.lruList.MoveToFront(frame.lruNode)
 		frame.page.Pin()
 		bp.hits++

@@ -98,7 +98,15 @@ func (e *Executor) ExecuteWithPlan(query *Query, plan *QueryPlan) ([]*document.D
 
 	var candidates []*document.Document
 
-	if plan.UseIndex && plan.Index != nil {
+	if plan.UseIntersection {
+		// Use index intersection
+		var err error
+		candidates, err = e.executeIndexIntersection(plan)
+		if err != nil {
+			// Fall back to collection scan if intersection fails
+			candidates = e.documents
+		}
+	} else if plan.UseIndex && plan.Index != nil {
 		// Use index to get candidate documents
 		var err error
 		candidates, err = e.executeIndexScan(plan)
@@ -450,4 +458,119 @@ func documentIDToString(id interface{}) string {
 	default:
 		return fmt.Sprintf("%v", v)
 	}
+}
+
+// executeIndexIntersection executes an index intersection plan
+func (e *Executor) executeIndexIntersection(plan *QueryPlan) ([]*document.Document, error) {
+	if len(plan.IntersectPlans) == 0 {
+		return e.documents, fmt.Errorf("no intersection plans provided")
+	}
+
+	// Execute each index scan and collect document IDs
+	idSets := make([]map[string]bool, len(plan.IntersectPlans))
+
+	for i, intersectPlan := range plan.IntersectPlans {
+		idSet := make(map[string]bool)
+
+		// Execute the index scan for this plan
+		docIDs, err := e.executeIntersectIndexScan(intersectPlan)
+		if err != nil {
+			return nil, err
+		}
+
+		// Add all IDs to the set
+		for _, id := range docIDs {
+			idSet[id] = true
+		}
+
+		idSets[i] = idSet
+	}
+
+	// Intersect all sets (find common document IDs)
+	resultIDs := e.intersectSets(idSets)
+
+	// Convert document IDs to documents
+	docs := make([]*document.Document, 0, len(resultIDs))
+	for id := range resultIDs {
+		if doc, exists := e.documentsMap[id]; exists {
+			docs = append(docs, doc)
+		}
+	}
+
+	return docs, nil
+}
+
+// executeIntersectIndexScan executes a single index scan for intersection
+func (e *Executor) executeIntersectIndexScan(plan *IndexIntersectPlan) ([]string, error) {
+	var docIDs []string
+
+	switch plan.ScanType {
+	case ScanTypeIndexExact:
+		// Exact match scan
+		value, exists := plan.Index.Search(plan.ScanKey)
+		if exists {
+			if idStr, ok := value.(string); ok {
+				docIDs = []string{idStr}
+			}
+		}
+
+	case ScanTypeIndexRange:
+		// Range scan
+		_, values := plan.Index.RangeScan(plan.ScanStart, plan.ScanEnd)
+		docIDs = make([]string, 0, len(values))
+
+		for _, v := range values {
+			if idStr, ok := v.(string); ok {
+				docIDs = append(docIDs, idStr)
+			}
+		}
+
+	default:
+		// Should not happen
+		return nil, fmt.Errorf("invalid scan type for intersection")
+	}
+
+	return docIDs, nil
+}
+
+// intersectSets performs set intersection on multiple sets
+func (e *Executor) intersectSets(sets []map[string]bool) map[string]bool {
+	if len(sets) == 0 {
+		return make(map[string]bool)
+	}
+
+	if len(sets) == 1 {
+		return sets[0]
+	}
+
+	// Start with the smallest set for efficiency
+	smallestIdx := 0
+	smallestSize := len(sets[0])
+	for i := 1; i < len(sets); i++ {
+		if len(sets[i]) < smallestSize {
+			smallestIdx = i
+			smallestSize = len(sets[i])
+		}
+	}
+
+	// Result starts with the smallest set
+	result := make(map[string]bool)
+	for id := range sets[smallestIdx] {
+		// Check if this ID exists in all other sets
+		inAll := true
+		for i, set := range sets {
+			if i == smallestIdx {
+				continue
+			}
+			if !set[id] {
+				inAll = false
+				break
+			}
+		}
+		if inAll {
+			result[id] = true
+		}
+	}
+
+	return result
 }

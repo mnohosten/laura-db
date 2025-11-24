@@ -23,6 +23,22 @@ const (
 	PageTypeOverflow
 )
 
+// String returns the string representation of the page type
+func (pt PageType) String() string {
+	switch pt {
+	case PageTypeData:
+		return "data"
+	case PageTypeIndex:
+		return "index"
+	case PageTypeFreeList:
+		return "freelist"
+	case PageTypeOverflow:
+		return "overflow"
+	default:
+		return "unknown"
+	}
+}
+
 // PageID is a unique identifier for a page
 type PageID uint32
 

@@ -1,0 +1,15 @@
+# Prometheus configuration for LauraDB monitoring
+# Usage: prometheus --config.file=prometheus.yml
+
+global:
+  scrape_interval: 5s      # How frequently to scrape targets
+  evaluation_interval: 5s  # How frequently to evaluate rules
+
+# Scrape configuration for LauraDB
+scrape_configs:
+  - job_name: 'laura_db'
+    static_configs:
+      - targets: ['localhost:8080']
+    metrics_path: '/_metrics'
+    scrape_interval: 5s
+    scrape_timeout: 4s

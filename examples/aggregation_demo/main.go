@@ -8,7 +8,8 @@ import (
 )
 
 func main() {
-	fmt.Println("=== Aggregation Pipeline Demo ===\n")
+	fmt.Println("=== Aggregation Pipeline Demo ===")
+	fmt.Println()
 
 	// Open database
 	config := database.DefaultConfig("./agg_demo_data")

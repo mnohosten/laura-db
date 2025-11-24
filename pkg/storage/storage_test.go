@@ -168,3 +168,302 @@ func TestStorageEngineRecovery(t *testing.T) {
 
 	engine2.UnpinPage(recoveredPage.ID, false)
 }
+
+func TestDeletePage(t *testing.T) {
+	dir := "./test_delete_page"
+	defer os.RemoveAll(dir)
+
+	config := DefaultConfig(dir)
+	engine, err := NewStorageEngine(config)
+	if err != nil {
+		t.Fatalf("Failed to create storage engine: %v", err)
+	}
+	defer engine.Close()
+
+	// Allocate a page
+	page, err := engine.AllocatePage()
+	if err != nil {
+		t.Fatalf("Failed to allocate page: %v", err)
+	}
+	pageID := page.ID
+
+	// Write some data
+	testData := []byte("test data for deletion")
+	copy(page.Data, testData)
+	page.MarkDirty()
+
+	// Unpin the page first
+	engine.UnpinPage(pageID, true)
+
+	// Delete the page
+	err = engine.bufferPool.DeletePage(pageID)
+	if err != nil {
+		t.Fatalf("Failed to delete page: %v", err)
+	}
+
+	// Verify page is removed from buffer pool
+	_, exists := engine.bufferPool.pages[pageID]
+	if exists {
+		t.Error("Expected page to be removed from buffer pool")
+	}
+}
+
+func TestDeletePinnedPage(t *testing.T) {
+	dir := "./test_delete_pinned"
+	defer os.RemoveAll(dir)
+
+	config := DefaultConfig(dir)
+	engine, err := NewStorageEngine(config)
+	if err != nil {
+		t.Fatalf("Failed to create storage engine: %v", err)
+	}
+	defer engine.Close()
+
+	// Allocate a page (it will be pinned)
+	page, err := engine.AllocatePage()
+	if err != nil {
+		t.Fatalf("Failed to allocate page: %v", err)
+	}
+
+	// Try to delete pinned page - should fail
+	err = engine.bufferPool.DeletePage(page.ID)
+	if err == nil {
+		t.Error("Expected error when deleting pinned page")
+	}
+
+	// Unpin and try again
+	engine.UnpinPage(page.ID, false)
+	err = engine.bufferPool.DeletePage(page.ID)
+	if err != nil {
+		t.Errorf("Failed to delete unpinned page: %v", err)
+	}
+}
+
+func TestDeallocatePage(t *testing.T) {
+	dir := "./test_deallocate_page"
+	defer os.RemoveAll(dir)
+
+	config := DefaultConfig(dir)
+	engine, err := NewStorageEngine(config)
+	if err != nil {
+		t.Fatalf("Failed to create storage engine: %v", err)
+	}
+	defer engine.Close()
+
+	// Allocate a page
+	page, err := engine.AllocatePage()
+	if err != nil {
+		t.Fatalf("Failed to allocate page: %v", err)
+	}
+	pageID := page.ID
+	engine.UnpinPage(pageID, false)
+
+	// Get initial free pages count
+	initialFreePages := len(engine.diskMgr.freePages)
+
+	// Deallocate the page
+	err = engine.diskMgr.DeallocatePage(pageID)
+	if err != nil {
+		t.Fatalf("Failed to deallocate page: %v", err)
+	}
+
+	// Verify free pages list grew
+	if len(engine.diskMgr.freePages) != initialFreePages+1 {
+		t.Errorf("Expected %d free pages, got %d", initialFreePages+1, len(engine.diskMgr.freePages))
+	}
+
+	// Verify the deallocated page is in free list
+	found := false
+	for _, freePageID := range engine.diskMgr.freePages {
+		if freePageID == pageID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Deallocated page not found in free pages list")
+	}
+}
+
+func TestDiskManagerStats(t *testing.T) {
+	dir := "./test_disk_stats"
+	defer os.RemoveAll(dir)
+
+	config := DefaultConfig(dir)
+	engine, err := NewStorageEngine(config)
+	if err != nil {
+		t.Fatalf("Failed to create storage engine: %v", err)
+	}
+	defer engine.Close()
+
+	// Get initial stats
+	stats := engine.diskMgr.Stats()
+	if stats == nil {
+		t.Fatal("Expected non-nil stats")
+	}
+
+	// Check required fields
+	if _, ok := stats["next_page_id"]; !ok {
+		t.Error("Stats missing next_page_id")
+	}
+	if _, ok := stats["free_pages"]; !ok {
+		t.Error("Stats missing free_pages")
+	}
+	if _, ok := stats["total_reads"]; !ok {
+		t.Error("Stats missing total_reads")
+	}
+	if _, ok := stats["total_writes"]; !ok {
+		t.Error("Stats missing total_writes")
+	}
+
+	// Allocate and write a page to increase stats
+	page, _ := engine.AllocatePage()
+	copy(page.Data, []byte("stats test"))
+	page.MarkDirty()
+	engine.UnpinPage(page.ID, true)
+
+	// Flush to ensure write
+	engine.bufferPool.FlushPage(page.ID)
+
+	// Get updated stats
+	newStats := engine.diskMgr.Stats()
+	nextPageID := newStats["next_page_id"].(PageID)
+	if nextPageID == 0 {
+		t.Error("Expected next_page_id to be greater than 0")
+	}
+}
+
+func TestBufferPoolStats(t *testing.T) {
+	dir := "./test_buffer_stats"
+	defer os.RemoveAll(dir)
+
+	config := DefaultConfig(dir)
+	config.BufferPoolSize = 10
+	engine, err := NewStorageEngine(config)
+	if err != nil {
+		t.Fatalf("Failed to create storage engine: %v", err)
+	}
+	defer engine.Close()
+
+	// Get initial stats
+	stats := engine.bufferPool.Stats()
+	if stats == nil {
+		t.Fatal("Expected non-nil stats")
+	}
+
+	// Check required fields
+	if _, ok := stats["capacity"]; !ok {
+		t.Error("Stats missing capacity")
+	}
+	if capacity := stats["capacity"].(int); capacity != 10 {
+		t.Errorf("Expected capacity 10, got %d", capacity)
+	}
+
+	// Allocate a page to add to buffer pool
+	page, _ := engine.AllocatePage()
+	engine.UnpinPage(page.ID, false)
+
+	// Get updated stats
+	newStats := engine.bufferPool.Stats()
+	size := newStats["size"].(int)
+	if size == 0 {
+		t.Error("Expected size to be greater than 0")
+	}
+
+	// Check hit rate exists
+	if _, ok := newStats["hit_rate"]; !ok {
+		t.Error("Stats missing hit_rate")
+	}
+}
+
+func TestPageTypeString(t *testing.T) {
+	tests := []struct {
+		pageType PageType
+		expected string
+	}{
+		{PageTypeData, "data"},
+		{PageTypeIndex, "index"},
+		{PageTypeFreeList, "freelist"},
+		{PageTypeOverflow, "overflow"},
+		{PageType(99), "unknown"},
+	}
+
+	for _, test := range tests {
+		result := test.pageType.String()
+		if result != test.expected {
+			t.Errorf("Expected %s, got %s", test.expected, result)
+		}
+	}
+}
+
+func TestPageFreeSpace(t *testing.T) {
+	page := &Page{
+		ID:   0,
+		Type: PageTypeData,
+		Data: make([]byte, PageSize),
+	}
+
+	freeSpace := page.FreeSpace()
+	if freeSpace != PageSize {
+		t.Errorf("Expected free space %d, got %d", PageSize, freeSpace)
+	}
+}
+
+func TestStorageEngineFlushPage(t *testing.T) {
+	dir := "./test_flush_page"
+	defer os.RemoveAll(dir)
+
+	config := DefaultConfig(dir)
+	engine, err := NewStorageEngine(config)
+	if err != nil {
+		t.Fatalf("Failed to create storage engine: %v", err)
+	}
+	defer engine.Close()
+
+	// Allocate a page and write data
+	page, err := engine.AllocatePage()
+	if err != nil {
+		t.Fatalf("Failed to allocate page: %v", err)
+	}
+
+	testData := []byte("flush test data")
+	copy(page.Data, testData)
+	page.MarkDirty()
+	pageID := page.ID
+	engine.UnpinPage(pageID, true)
+
+	// Flush the specific page
+	err = engine.FlushPage(pageID)
+	if err != nil {
+		t.Fatalf("Failed to flush page: %v", err)
+	}
+}
+
+func TestStorageEngineFlushAll(t *testing.T) {
+	dir := "./test_flush_all"
+	defer os.RemoveAll(dir)
+
+	config := DefaultConfig(dir)
+	engine, err := NewStorageEngine(config)
+	if err != nil {
+		t.Fatalf("Failed to create storage engine: %v", err)
+	}
+	defer engine.Close()
+
+	// Allocate multiple pages and write data
+	for i := 0; i < 5; i++ {
+		page, err := engine.AllocatePage()
+		if err != nil {
+			t.Fatalf("Failed to allocate page: %v", err)
+		}
+		copy(page.Data, []byte("test data"))
+		page.MarkDirty()
+		engine.UnpinPage(page.ID, true)
+	}
+
+	// Flush all pages
+	err = engine.FlushAll()
+	if err != nil {
+		t.Fatalf("Failed to flush all pages: %v", err)
+	}
+}

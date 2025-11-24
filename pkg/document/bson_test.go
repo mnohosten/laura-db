@@ -148,3 +148,176 @@ func TestBSONEncodeDecodeArray(t *testing.T) {
 		t.Error("Array element not correctly decoded")
 	}
 }
+
+// Test BSON encoding with ObjectID
+func TestBSONEncodeDecodeObjectID(t *testing.T) {
+	doc := NewDocument()
+	id := NewObjectID()
+	doc.Set("_id", id)
+	doc.Set("name", "Test")
+
+	encoder := NewEncoder()
+	data, err := encoder.Encode(doc)
+	if err != nil {
+		t.Fatalf("Encode failed: %v", err)
+	}
+
+	decoder := NewDecoder(data)
+	decoded, err := decoder.Decode()
+	if err != nil {
+		t.Fatalf("Decode failed: %v", err)
+	}
+
+	val, exists := decoded.Get("_id")
+	if !exists {
+		t.Fatal("_id field not found")
+	}
+
+	decodedID := val.(ObjectID)
+	if decodedID.String() != id.String() {
+		t.Error("ObjectID not correctly encoded/decoded")
+	}
+}
+
+// Test BSON with mixed array types
+func TestBSONEncodeDecodeMixedArray(t *testing.T) {
+	doc := NewDocument()
+	doc.Set("mixed", []interface{}{
+		int64(42),
+		"string",
+		true,
+		3.14,
+		[]byte{0x01, 0x02},
+	})
+
+	encoder := NewEncoder()
+	data, err := encoder.Encode(doc)
+	if err != nil {
+		t.Fatalf("Encode failed: %v", err)
+	}
+
+	decoder := NewDecoder(data)
+	decoded, err := decoder.Decode()
+	if err != nil {
+		t.Fatalf("Decode failed: %v", err)
+	}
+
+	val, exists := decoded.Get("mixed")
+	if !exists {
+		t.Fatal("Mixed array not found")
+	}
+
+	arr := val.([]interface{})
+	if len(arr) != 5 {
+		t.Errorf("Expected 5 elements, got %d", len(arr))
+	}
+
+	// Verify types
+	if arr[0].(int64) != 42 {
+		t.Error("First element (int64) incorrect")
+	}
+	if arr[1].(string) != "string" {
+		t.Error("Second element (string) incorrect")
+	}
+	if arr[2].(bool) != true {
+		t.Error("Third element (bool) incorrect")
+	}
+}
+
+// Test BSON with nested arrays
+func TestBSONEncodeDecodeNestedArray(t *testing.T) {
+	doc := NewDocument()
+	doc.Set("nested", []interface{}{
+		[]interface{}{"a", "b"},
+		[]interface{}{int64(1), int64(2)},
+	})
+
+	encoder := NewEncoder()
+	data, err := encoder.Encode(doc)
+	if err != nil {
+		t.Fatalf("Encode failed: %v", err)
+	}
+
+	decoder := NewDecoder(data)
+	decoded, err := decoder.Decode()
+	if err != nil {
+		t.Fatalf("Decode failed: %v", err)
+	}
+
+	val, exists := decoded.Get("nested")
+	if !exists {
+		t.Fatal("Nested array not found")
+	}
+
+	outer := val.([]interface{})
+	if len(outer) != 2 {
+		t.Errorf("Expected 2 outer elements, got %d", len(outer))
+	}
+
+	// Check first nested array
+	inner1 := outer[0].([]interface{})
+	if len(inner1) != 2 || inner1[0].(string) != "a" {
+		t.Error("First nested array incorrect")
+	}
+}
+
+// Test BSON with deeply nested documents
+func TestBSONEncodeDeeplyNested(t *testing.T) {
+	doc := NewDocument()
+
+	level1 := NewDocument()
+	level2 := NewDocument()
+	level3 := NewDocument()
+
+	level3.Set("value", "deep")
+	level2.Set("level3", level3)
+	level1.Set("level2", level2)
+	doc.Set("level1", level1)
+
+	encoder := NewEncoder()
+	data, err := encoder.Encode(doc)
+	if err != nil {
+		t.Fatalf("Encode failed: %v", err)
+	}
+
+	decoder := NewDecoder(data)
+	decoded, err := decoder.Decode()
+	if err != nil {
+		t.Fatalf("Decode failed: %v", err)
+	}
+
+	// Navigate through nested documents
+	l1, _ := decoded.Get("level1")
+	l2, _ := l1.(*Document).Get("level2")
+	l3, _ := l2.(*Document).Get("level3")
+	val, _ := l3.(*Document).Get("value")
+
+	if val.(string) != "deep" {
+		t.Error("Deeply nested value not correctly encoded/decoded")
+	}
+}
+
+// Test BSON empty document
+func TestBSONEncodeDecodeEmpty(t *testing.T) {
+	doc := NewDocument()
+
+	encoder := NewEncoder()
+	data, err := encoder.Encode(doc)
+	if err != nil {
+		t.Fatalf("Encode empty document failed: %v", err)
+	}
+
+	if len(data) == 0 {
+		t.Error("Expected non-empty data for empty document")
+	}
+
+	decoder := NewDecoder(data)
+	decoded, err := decoder.Decode()
+	if err != nil {
+		t.Fatalf("Decode empty document failed: %v", err)
+	}
+
+	if decoded.Len() != 0 {
+		t.Errorf("Expected empty document, got %d fields", decoded.Len())
+	}
+}
