@@ -1,4 +1,4 @@
-.PHONY: all build clean test server cli repair examples docker docker-build docker-run docker-stop docker-clean compose compose-up compose-up-monitoring compose-up-prod compose-down compose-down-volumes compose-logs compose-logs-all compose-restart help
+.PHONY: all build clean test server cli repair examples proto docker docker-build docker-run docker-stop docker-clean compose compose-up compose-up-monitoring compose-up-prod compose-down compose-down-volumes compose-logs compose-logs-all compose-restart help
 
 # Default target
 all: build
@@ -303,6 +303,30 @@ clean:
 	@rm -rf benchmarks/
 	@echo "✓ Cleaned"
 
+# Generate protobuf code
+proto:
+	@echo "Generating protobuf code..."
+	@if ! command -v protoc > /dev/null; then \
+		echo "❌ protoc not found. Install it with:"; \
+		echo "   macOS: brew install protobuf"; \
+		echo "   Linux: apt-get install -y protobuf-compiler"; \
+		echo "   Or visit: https://grpc.io/docs/protoc-installation/"; \
+		exit 1; \
+	fi
+	@if ! command -v protoc-gen-go > /dev/null; then \
+		echo "Installing protoc-gen-go..."; \
+		go install google.golang.org/protobuf/cmd/protoc-gen-go@latest; \
+	fi
+	@if ! command -v protoc-gen-go-grpc > /dev/null; then \
+		echo "Installing protoc-gen-go-grpc..."; \
+		go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest; \
+	fi
+	@echo "Generating Go code from .proto files..."
+	@protoc --go_out=. --go_opt=paths=source_relative \
+		--go-grpc_out=. --go-grpc_opt=paths=source_relative \
+		pkg/cluster/proto/*.proto
+	@echo "✓ Protobuf code generated"
+
 # Install dependencies
 deps:
 	@echo "Installing dependencies..."
@@ -410,6 +434,7 @@ help:
 	@echo "  make lint-fix     Run linter and auto-fix issues ✅"
 	@echo ""
 	@echo "Maintenance:"
+	@echo "  make proto        Generate Go code from protobuf files ✅"
 	@echo "  make clean        Remove build artifacts ✅"
 	@echo "  make deps         Install dependencies ✅"
 	@echo "  make help         Show this help ✅"

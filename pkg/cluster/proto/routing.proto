@@ -1,0 +1,213 @@
+syntax = "proto3";
+
+package lauradb.cluster;
+
+option go_package = "github.com/mnohosten/laura-db/pkg/cluster/proto";
+
+// QueryRequest represents a query to be routed to appropriate shard(s)
+message QueryRequest {
+  string request_id = 1;        // Unique request identifier
+  string database = 2;
+  string collection = 3;
+  bytes query = 4;              // Serialized query (BSON)
+  bytes projection = 5;         // Serialized projection
+  int64 limit = 6;
+  int64 skip = 7;
+  bytes sort = 8;               // Serialized sort spec
+  bytes shard_key = 9;          // Serialized shard key value (for targeted queries)
+}
+
+message QueryResponse {
+  string request_id = 1;
+  repeated bytes documents = 2;  // Serialized documents (BSON)
+  bool more_available = 3;       // True if pagination needed
+  string cursor_id = 4;          // For paginated results
+  QueryStats stats = 5;
+}
+
+message QueryStats {
+  int32 documents_examined = 1;
+  int32 documents_returned = 2;
+  int64 execution_time_ms = 3;
+  repeated string shards_queried = 4;
+}
+
+// InsertRequest represents document insertion
+message InsertRequest {
+  string request_id = 1;
+  string database = 2;
+  string collection = 3;
+  repeated bytes documents = 4;  // Serialized documents to insert
+  bool ordered = 5;              // Stop on first error if true
+}
+
+message InsertResponse {
+  string request_id = 1;
+  int32 inserted_count = 2;
+  repeated InsertError errors = 3;
+}
+
+message InsertError {
+  int32 index = 1;
+  string error = 2;
+}
+
+// UpdateRequest represents document update
+message UpdateRequest {
+  string request_id = 1;
+  string database = 2;
+  string collection = 3;
+  bytes query = 4;              // Serialized query filter
+  bytes update = 5;             // Serialized update operators
+  bool multi = 6;               // Update multiple documents
+  bool upsert = 7;
+}
+
+message UpdateResponse {
+  string request_id = 1;
+  int32 matched_count = 2;
+  int32 modified_count = 3;
+  int32 upserted_count = 4;
+}
+
+// DeleteRequest represents document deletion
+message DeleteRequest {
+  string request_id = 1;
+  string database = 2;
+  string collection = 3;
+  bytes query = 4;              // Serialized query filter
+  bool multi = 5;               // Delete multiple documents
+}
+
+message DeleteResponse {
+  string request_id = 1;
+  int32 deleted_count = 2;
+}
+
+// AggregationRequest represents aggregation pipeline
+message AggregationRequest {
+  string request_id = 1;
+  string database = 2;
+  string collection = 3;
+  repeated bytes pipeline = 4;  // Serialized pipeline stages
+}
+
+message AggregationResponse {
+  string request_id = 1;
+  repeated bytes results = 2;   // Serialized result documents
+}
+
+// Shard routing information
+message ShardRouteInfo {
+  string shard_id = 1;
+  string node_id = 2;
+  string host = 3;
+  int32 port = 4;
+  repeated ChunkRange chunks = 5;
+}
+
+message ChunkRange {
+  bytes min_key = 1;
+  bytes max_key = 2;
+}
+
+// Config server messages for routing metadata
+message GetShardMapRequest {
+  string database = 1;
+  string collection = 2;
+  int64 version = 3;  // Current version, return only if newer
+}
+
+message GetShardMapResponse {
+  int64 version = 1;
+  repeated ShardRouteInfo shards = 2;
+  string shard_key_field = 3;
+  ShardingStrategy strategy = 4;
+}
+
+enum ShardingStrategy {
+  UNKNOWN_STRATEGY = 0;
+  HASH = 1;
+  RANGE = 2;
+  COMPOUND = 3;
+}
+
+// RouterService handles query routing to shards
+service RouterService {
+  // Execute a query (may scatter-gather across shards)
+  rpc Query(QueryRequest) returns (QueryResponse);
+
+  // Insert documents to appropriate shard(s)
+  rpc Insert(InsertRequest) returns (InsertResponse);
+
+  // Update documents across shard(s)
+  rpc Update(UpdateRequest) returns (UpdateResponse);
+
+  // Delete documents from shard(s)
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+
+  // Execute aggregation pipeline
+  rpc Aggregate(AggregationRequest) returns (AggregationResponse);
+
+  // Get shard routing map for a collection
+  rpc GetShardMap(GetShardMapRequest) returns (GetShardMapResponse);
+}
+
+// ConfigService manages shard configuration
+service ConfigService {
+  // Add a new shard to the cluster
+  rpc AddShard(AddShardRequest) returns (AddShardResponse);
+
+  // Remove a shard from the cluster
+  rpc RemoveShard(RemoveShardRequest) returns (RemoveShardResponse);
+
+  // Split a chunk into two chunks
+  rpc SplitChunk(SplitChunkRequest) returns (SplitChunkResponse);
+
+  // Migrate a chunk to another shard
+  rpc MigrateChunk(MigrateChunkRequest) returns (MigrateChunkResponse);
+}
+
+message AddShardRequest {
+  string shard_id = 1;
+  string node_id = 2;
+  string host = 3;
+  int32 port = 4;
+}
+
+message AddShardResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message RemoveShardRequest {
+  string shard_id = 1;
+}
+
+message RemoveShardResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message SplitChunkRequest {
+  string chunk_id = 1;
+  bytes split_point = 2;  // Key value at which to split
+}
+
+message SplitChunkResponse {
+  bool success = 1;
+  string left_chunk_id = 2;
+  string right_chunk_id = 3;
+}
+
+message MigrateChunkRequest {
+  string chunk_id = 1;
+  string from_shard = 2;
+  string to_shard = 3;
+}
+
+message MigrateChunkResponse {
+  bool success = 1;
+  int64 documents_migrated = 2;
+  string error = 3;
+}

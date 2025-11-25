@@ -1,0 +1,109 @@
+syntax = "proto3";
+
+package lauradb.cluster;
+
+option go_package = "github.com/mnohosten/laura-db/pkg/cluster/proto";
+
+// OplogEntry represents a single operation in the replication log
+message OplogEntry {
+  int64 op_id = 1;              // Monotonically increasing operation ID
+  int64 timestamp = 2;          // Unix timestamp in milliseconds
+  string namespace = 3;         // Database.Collection
+  OperationType op_type = 4;    // Type of operation
+  bytes document = 5;           // Serialized document (BSON)
+  bytes query = 6;              // Serialized query for updates/deletes
+  bytes update = 7;             // Serialized update operators
+  int64 txn_id = 8;             // Transaction ID (0 if not in transaction)
+}
+
+enum OperationType {
+  UNKNOWN_OP = 0;
+  INSERT = 1;
+  UPDATE = 2;
+  DELETE = 3;
+  CREATE_COLLECTION = 4;
+  DROP_COLLECTION = 5;
+  CREATE_INDEX = 6;
+  DROP_INDEX = 7;
+}
+
+// ReplicationStreamRequest initiates oplog streaming
+message ReplicationStreamRequest {
+  string replica_id = 1;        // ID of the requesting replica
+  int64 start_oplog_id = 2;     // Start streaming from this oplog ID
+  bool initial_sync = 3;        // True if this is initial sync
+}
+
+// ReplicationStreamResponse streams oplog entries
+message ReplicationStreamResponse {
+  repeated OplogEntry entries = 1;
+  int64 latest_oplog_id = 2;    // Latest oplog ID on primary
+  bool more_available = 3;       // True if more entries available
+}
+
+// InitialSyncRequest requests full data copy
+message InitialSyncRequest {
+  string replica_id = 1;
+  repeated string collections = 2;  // Empty means all collections
+}
+
+message InitialSyncResponse {
+  bytes data_chunk = 1;          // Chunk of serialized data
+  bool complete = 2;             // True when sync is complete
+  int64 sync_point_oplog_id = 3; // Oplog ID at time of snapshot
+}
+
+// Election messages for leader election
+message VoteRequest {
+  string candidate_id = 1;
+  int64 term = 2;               // Election term
+  int64 last_oplog_id = 3;      // Last oplog ID on candidate
+  int64 priority = 4;           // Candidate priority
+}
+
+message VoteResponse {
+  bool vote_granted = 1;
+  int64 term = 2;
+  string voter_id = 3;
+}
+
+// Write concern for replication
+message WriteAcknowledgment {
+  string node_id = 1;
+  int64 oplog_id = 2;           // Oplog ID that was applied
+  bool success = 3;
+  string error = 4;
+}
+
+message WriteAcknowledgmentRequest {
+  repeated WriteAcknowledgment acks = 1;
+}
+
+message WriteAcknowledgmentResponse {
+  bool all_acknowledged = 1;
+  int32 ack_count = 2;
+}
+
+// ReplicationService handles data replication
+service ReplicationService {
+  // Stream oplog entries to a replica
+  rpc StreamOplog(ReplicationStreamRequest) returns (stream ReplicationStreamResponse);
+
+  // Perform initial sync for a new replica
+  rpc InitialSync(InitialSyncRequest) returns (stream InitialSyncResponse);
+
+  // Request vote during election
+  rpc RequestVote(VoteRequest) returns (VoteResponse);
+
+  // Acknowledge write replication
+  rpc AcknowledgeWrite(WriteAcknowledgmentRequest) returns (WriteAcknowledgmentResponse);
+
+  // Append oplog entry (called by primary)
+  rpc AppendOplog(OplogEntry) returns (AppendOplogResponse);
+}
+
+message AppendOplogResponse {
+  bool success = 1;
+  int64 oplog_id = 2;
+  string error = 3;
+}

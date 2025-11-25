@@ -1,0 +1,122 @@
+syntax = "proto3";
+
+package lauradb.cluster;
+
+option go_package = "github.com/mnohosten/laura-db/pkg/cluster/proto";
+
+// Node represents a LauraDB node in the cluster
+message Node {
+  string id = 1;          // Unique node identifier
+  string host = 2;        // Hostname or IP address
+  int32 port = 3;         // Port number
+  NodeRole role = 4;      // Current role in the cluster
+  int64 priority = 5;     // Election priority (higher = more likely to become primary)
+  map<string, string> tags = 6;  // Custom tags for targeting
+}
+
+enum NodeRole {
+  UNKNOWN = 0;
+  PRIMARY = 1;
+  SECONDARY = 2;
+  ARBITER = 3;
+  SHARD = 4;
+  CONFIG_SERVER = 5;
+  ROUTER = 6;
+}
+
+// NodeRegistration is sent when a node joins the cluster
+message NodeRegistrationRequest {
+  Node node = 1;
+  repeated string seed_nodes = 2;  // Known nodes to connect to
+}
+
+message NodeRegistrationResponse {
+  bool success = 1;
+  string message = 2;
+  repeated Node cluster_nodes = 3;  // Current cluster members
+  ClusterTopology topology = 4;
+}
+
+// NodeDeregistration is sent when a node gracefully leaves
+message NodeDeregistrationRequest {
+  string node_id = 1;
+  string reason = 2;
+}
+
+message NodeDeregistrationResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// ClusterTopology represents the current cluster state
+message ClusterTopology {
+  int64 version = 1;  // Incremented on every topology change
+  repeated Node nodes = 2;
+  string primary_id = 3;
+  repeated ReplicaSet replica_sets = 4;
+  repeated ShardInfo shards = 5;
+}
+
+message ReplicaSet {
+  string id = 1;
+  repeated string node_ids = 2;
+  string primary_id = 3;
+  int64 term = 4;  // Raft-style term for leader election
+}
+
+message ShardInfo {
+  string shard_id = 1;
+  string node_id = 2;
+  repeated ChunkRange chunks = 3;
+}
+
+message ChunkRange {
+  string chunk_id = 1;
+  bytes min_key = 2;  // Minimum shard key value (serialized)
+  bytes max_key = 3;  // Maximum shard key value (serialized)
+}
+
+// Heartbeat messages for health monitoring
+message HeartbeatRequest {
+  string node_id = 1;
+  int64 timestamp = 2;
+  NodeStatus status = 3;
+}
+
+message HeartbeatResponse {
+  bool ack = 1;
+  int64 timestamp = 2;
+  ClusterTopology topology = 3;  // Updated topology if changed
+}
+
+message NodeStatus {
+  NodeRole role = 1;
+  int64 last_oplog_id = 2;  // For replication lag monitoring
+  ResourceStats resources = 3;
+}
+
+message ResourceStats {
+  double cpu_percent = 1;
+  int64 memory_bytes = 2;
+  int64 disk_bytes_used = 3;
+  int64 disk_bytes_total = 4;
+}
+
+// ClusterService handles node membership and discovery
+service ClusterService {
+  // Register a new node in the cluster
+  rpc RegisterNode(NodeRegistrationRequest) returns (NodeRegistrationResponse);
+
+  // Deregister a node from the cluster
+  rpc DeregisterNode(NodeDeregistrationRequest) returns (NodeDeregistrationResponse);
+
+  // Send heartbeat to maintain membership
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+
+  // Get current cluster topology
+  rpc GetTopology(GetTopologyRequest) returns (ClusterTopology);
+}
+
+message GetTopologyRequest {
+  int64 min_version = 1;  // Return only if topology version > this
+}

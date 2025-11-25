@@ -1,0 +1,109 @@
+syntax = "proto3";
+
+package lauradb.cluster;
+
+option go_package = "github.com/mnohosten/laura-db/pkg/cluster/proto";
+
+// Two-Phase Commit (2PC) protocol messages
+
+// Transaction represents a distributed transaction
+message Transaction {
+  string txn_id = 1;           // Unique transaction identifier
+  int64 timestamp = 2;         // Transaction start time
+  repeated string participants = 3;  // Node IDs participating
+  TransactionState state = 4;
+}
+
+enum TransactionState {
+  UNKNOWN_STATE = 0;
+  ACTIVE = 1;
+  PREPARING = 2;
+  PREPARED = 3;
+  COMMITTING = 4;
+  COMMITTED = 5;
+  ABORTING = 6;
+  ABORTED = 7;
+}
+
+// Phase 1: Prepare
+message PrepareRequest {
+  string txn_id = 1;
+  string coordinator_id = 2;
+  repeated Operation operations = 3;  // Operations to prepare
+  int64 timeout_ms = 4;
+}
+
+message Operation {
+  string database = 1;
+  string collection = 2;
+  OperationType op_type = 3;
+  bytes data = 4;  // Serialized operation data
+}
+
+enum OperationType {
+  UNKNOWN_OP = 0;
+  INSERT = 1;
+  UPDATE = 2;
+  DELETE = 3;
+}
+
+message PrepareResponse {
+  string txn_id = 1;
+  string participant_id = 2;
+  bool vote = 3;  // true = prepared, false = abort
+  string error = 4;
+}
+
+// Phase 2: Commit or Abort
+message CommitRequest {
+  string txn_id = 1;
+  string coordinator_id = 2;
+}
+
+message CommitResponse {
+  string txn_id = 1;
+  string participant_id = 2;
+  bool success = 3;
+  string error = 4;
+}
+
+message AbortRequest {
+  string txn_id = 1;
+  string coordinator_id = 2;
+  string reason = 3;
+}
+
+message AbortResponse {
+  string txn_id = 1;
+  string participant_id = 2;
+  bool success = 3;
+  string error = 4;
+}
+
+// Transaction recovery for failed coordinator
+message RecoveryRequest {
+  string txn_id = 1;
+  string requesting_node_id = 2;
+}
+
+message RecoveryResponse {
+  string txn_id = 1;
+  TransactionState state = 2;
+  repeated string participants = 3;
+  string coordinator_id = 4;
+}
+
+// TransactionService handles distributed transactions
+service TransactionService {
+  // Phase 1: Ask participants to prepare
+  rpc Prepare(PrepareRequest) returns (PrepareResponse);
+
+  // Phase 2a: Instruct participants to commit
+  rpc Commit(CommitRequest) returns (CommitResponse);
+
+  // Phase 2b: Instruct participants to abort
+  rpc Abort(AbortRequest) returns (AbortResponse);
+
+  // Query transaction state for recovery
+  rpc QueryTransactionState(RecoveryRequest) returns (RecoveryResponse);
+}

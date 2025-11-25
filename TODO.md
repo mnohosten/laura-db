@@ -33,7 +33,7 @@ LauraDB is a production-grade educational MongoDB-like document database with co
 **Impact**: Transforms LauraDB from "educational database with clustering algorithms" to "actual distributed database."
 
 ### 1.1 gRPC Transport Layer (~1500-2000 LOC)
-- [ ] Define protobuf schemas for cluster communication
+- [x] Define protobuf schemas for cluster communication
   - Node registration and discovery messages
   - Heartbeat and health check messages
   - Replication messages (oplog entries, sync requests)
