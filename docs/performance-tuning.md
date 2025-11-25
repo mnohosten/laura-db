@@ -67,6 +67,256 @@ srv, err := server.New(config)
 
 ---
 
+### Document Cache Configuration
+
+**Per-collection LRU cache for frequently accessed documents:**
+
+The document cache stores fully deserialized documents, providing faster access than the buffer pool for frequently queried data.
+
+**Default:** 1000 documents per collection
+
+**Configuration:**
+```go
+// Embedded mode (requires code change in Collection)
+// Document cache is created at collection initialization
+// Default: NewDocumentStore(diskManager, 1000)
+
+// HTTP Server mode
+config := server.DefaultConfig()
+config.DocumentCache = 5000  // Larger cache for high-read workloads
+```
+
+**Sizing Guidelines:**
+
+| Workload Type | Recommended Size | Reasoning |
+|--------------|------------------|-----------|
+| Memory-constrained | 500-1000 docs | Minimize memory footprint |
+| Typical workload | 1000-2000 docs | Balanced performance/memory |
+| High-read workload | 5000-10000 docs | Maximum cache hit rate |
+| Large documents (>10KB) | 500-1000 docs | Documents consume more memory |
+
+**Memory Calculation:**
+```
+Document Cache Memory = Collections × CacheSize × AvgDocSize
+
+Example:
+10 collections × 5000 docs × 2KB avg = 100MB
+```
+
+**When to increase:**
+- High read workload on same documents
+- Sufficient available memory
+- Low query cache hit rate
+- Documents accessed multiple times
+
+**When to decrease:**
+- Memory-constrained environment
+- Large documents (MB-sized)
+- Write-heavy workloads (cache invalidation overhead)
+- Many collections (multiplies memory usage)
+
+---
+
+### Disk I/O Optimization
+
+LauraDB uses persistent disk storage with multiple optimization layers. Understanding these helps tune for your workload.
+
+#### Storage Architecture
+
+```
+┌─────────────────────────────────────────┐
+│     Application (Queries)                │
+└─────────────────┬───────────────────────┘
+                  │
+┌─────────────────┼───────────────────────┐
+│     Query Cache (5-min TTL)             │ ← Level 1: Query results
+└─────────────────┬───────────────────────┘
+                  │
+┌─────────────────┼───────────────────────┐
+│   Document Cache (LRU per collection)   │ ← Level 2: Deserialized docs
+└─────────────────┬───────────────────────┘
+                  │
+┌─────────────────┼───────────────────────┐
+│  Buffer Pool (LRU page cache)           │ ← Level 3: Raw pages
+└─────────────────┬───────────────────────┘
+                  │
+┌─────────────────┼───────────────────────┐
+│            Disk Files                   │ ← Level 4: Persistent storage
+│  - data.db (slotted pages)              │
+│  - wal.log (write-ahead log)            │
+│  - collections/ (metadata)              │
+└─────────────────────────────────────────┘
+```
+
+#### Buffer Pool Hit Rate Optimization
+
+**Goal:** Maximize buffer pool hit rate to minimize disk I/O
+
+**Monitor Hit Rate:**
+```go
+stats := db.Stats()
+hitRate := stats["bufferPool"]["hitRate"].(float64)
+fmt.Printf("Buffer pool hit rate: %.2f%%\n", hitRate*100)
+
+// Target: >90% for read-heavy workloads
+// Target: >70% for mixed workloads
+```
+
+**Optimization Strategies:**
+
+1. **Increase Buffer Pool Size**
+   ```go
+   config := database.DefaultConfig("./data")
+
+   // Start with 10-20% of available RAM
+   availableRAM := 4 * 1024 * 1024 * 1024  // 4GB
+   bufferPoolSize := (availableRAM * 15 / 100) / 4096  // 15% of RAM / 4KB per page
+
+   config.BufferPoolSize = int(bufferPoolSize)  // ~15,360 pages (~60MB)
+   ```
+
+2. **Monitor Working Set Size**
+   ```bash
+   # Check actual database size
+   du -sh ./data/data.db
+
+   # If database is 100MB and buffer pool is 60MB:
+   # - Hot data (60%) fits in cache
+   # - Cold data (40%) requires disk I/O
+   ```
+
+3. **Optimize for Access Patterns**
+   - **Random access:** Increase buffer pool to cover frequently accessed pages
+   - **Sequential scans:** Buffer pool less effective, consider read-ahead strategies
+   - **Working set fits in memory:** Buffer pool = working set size + 20% overhead
+
+#### Disk Hardware Recommendations
+
+**Storage Type Impact:**
+
+| Storage Type | Random Read | Sequential Read | Recommendation |
+|-------------|-------------|-----------------|----------------|
+| HDD (7200 RPM) | ~100 IOPS | ~120 MB/s | Increase buffer pool, avoid random I/O |
+| SATA SSD | ~10K IOPS | ~500 MB/s | Good for most workloads |
+| NVMe SSD | ~100K IOPS | ~3000 MB/s | Excellent, can reduce buffer pool |
+| RAM disk | ~1M IOPS | ~10 GB/s | Development/testing only |
+
+**Optimization Tips by Storage Type:**
+
+**HDD:**
+- Increase buffer pool size (20-30% of RAM)
+- Increase document cache (reduce page reads)
+- Use sequential writes (batch operations)
+- Consider index consolidation (reduce random seeks)
+- Schedule maintenance during off-hours
+
+**SSD:**
+- Moderate buffer pool (10-15% of RAM)
+- Balance between cache and available memory
+- TRIM/garbage collection enabled
+- Monitor write endurance
+
+**NVMe:**
+- Smaller buffer pool acceptable (5-10% of RAM)
+- Disk I/O is fast, cache overhead less beneficial
+- Focus on query optimization over caching
+
+#### File System Optimization
+
+**Linux/Unix:**
+```bash
+# Mount options for data directory
+mount -o noatime,nodiratime /dev/sda1 /data
+
+# Disable access time updates (reduces writes)
+# noatime: No access time updates
+# nodiratime: No directory access time updates
+```
+
+**I/O Scheduler:**
+```bash
+# For SSDs: use 'noop' or 'none'
+echo noop > /sys/block/sda/queue/scheduler
+
+# For HDDs: use 'deadline' or 'cfq'
+echo deadline > /sys/block/sda/queue/scheduler
+```
+
+**File System Choice:**
+- **ext4:** Good general purpose, mature
+- **XFS:** Better for large files (>1GB databases)
+- **ZFS:** Advanced features (compression, checksums) but higher overhead
+- **Btrfs:** Modern features but less mature
+
+#### Write-Ahead Log (WAL) Optimization
+
+**WAL Impact:**
+- Every write operation logs to WAL before applying
+- Sequential writes to WAL (fast even on HDD)
+- Periodic sync to disk ensures durability
+
+**Configuration Trade-offs:**
+
+```go
+// Embedded mode - WAL is managed automatically
+// Sync frequency controlled by storage engine
+
+// Monitor WAL size
+import "os"
+info, _ := os.Stat("./data/wal.log")
+walSize := info.Size()
+```
+
+**Optimization Strategies:**
+
+1. **Separate WAL and Data on Different Disks**
+   ```bash
+   # Data on /dev/sda (SSD)
+   # WAL on /dev/sdb (separate SSD or fast HDD)
+   ln -s /mnt/wal/wal.log ./data/wal.log
+   ```
+
+2. **Batch Write Operations**
+   ```go
+   // Bad: Many small writes
+   for _, doc := range docs {
+       coll.InsertOne(doc)  // Each triggers WAL sync
+   }
+
+   // Good: Batch write
+   coll.InsertMany(docs)  // Single WAL sync
+   ```
+
+3. **Monitor WAL Growth**
+   - Large WAL indicates unsynced changes
+   - Checkpoint trigger flushes buffer pool to disk
+   - Truncates WAL after successful checkpoint
+
+#### Performance Tuning Checklist
+
+**For Read-Heavy Workloads:**
+- ✅ Increase buffer pool size (15-20% of RAM)
+- ✅ Increase document cache (5000-10000 docs)
+- ✅ Create indexes on frequently queried fields
+- ✅ Use SSD/NVMe storage
+- ✅ Monitor and optimize query cache hit rate
+
+**For Write-Heavy Workloads:**
+- ✅ Use batch operations (InsertMany, UpdateMany)
+- ✅ Moderate buffer pool (10-15% of RAM)
+- ✅ Smaller document cache (1000-2000 docs)
+- ✅ Consider separating WAL to different disk
+- ✅ Use SSD for WAL, HDD for data acceptable
+
+**For Mixed Workloads:**
+- ✅ Balanced configuration (10-15% RAM for buffer pool)
+- ✅ Moderate document cache (2000-3000 docs)
+- ✅ Index frequently queried fields
+- ✅ Monitor hit rates and adjust
+- ✅ Use SSD for best overall performance
+
+---
+
 ## Index Optimization
 
 ### Index Selection

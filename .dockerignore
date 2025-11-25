@@ -1,0 +1,75 @@
+# Git files
+.git
+.gitignore
+.github
+
+# Build artifacts
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test files
+*_test.go
+test_data/
+data/
+laura_data/
+
+# Database data directories (persistent data should not be in image)
+./data
+./dev-data
+./demo_data
+./persistence_demo_data
+./large_dataset_data
+./perf_*
+*_data/
+*.db
+*.log
+
+# Coverage reports
+*.out
+*.html
+coverage.out
+coverage.html
+test-results.log
+handler-test-results.log
+
+# Benchmarks
+benchmarks/
+*.bench
+
+# Memory profiles
+profiles/
+*.prof
+*.pprof
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Documentation (keep minimal docs)
+docs/
+*.md
+!README.md
+
+# Examples
+examples/
+
+# Scripts
+scripts/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Dependencies (will be downloaded during build)
+vendor/

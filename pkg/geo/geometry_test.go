@@ -310,3 +310,123 @@ func TestParseGeoJSONPolygon(t *testing.T) {
 		t.Errorf("Expected 5 points, got %d", len(polygon.Rings[0]))
 	}
 }
+
+func TestParseGeoJSONPolygonInvalidCoordinates(t *testing.T) {
+	tests := []struct {
+		name string
+		data map[string]interface{}
+	}{
+		{
+			name: "Missing coordinates",
+			data: map[string]interface{}{"type": "Polygon"},
+		},
+		{
+			name: "Invalid coordinates type",
+			data: map[string]interface{}{"coordinates": "invalid"},
+		},
+		{
+			name: "Ring not an array",
+			data: map[string]interface{}{"coordinates": []interface{}{"invalid"}},
+		},
+		{
+			name: "Point not an array",
+			data: map[string]interface{}{
+				"coordinates": []interface{}{
+					[]interface{}{"invalid_point"},
+				},
+			},
+		},
+		{
+			name: "Point with wrong number of coordinates",
+			data: map[string]interface{}{
+				"coordinates": []interface{}{
+					[]interface{}{
+						[]interface{}{0.0}, // Only one coordinate
+					},
+				},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := ParseGeoJSONPolygon(test.data)
+			if err == nil {
+				t.Error("Expected error for invalid GeoJSON polygon")
+			}
+		})
+	}
+}
+
+func TestToFloat64AllTypes(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    interface{}
+		expected float64
+		ok       bool
+	}{
+		{"float64", float64(10.5), 10.5, true},
+		{"float32", float32(10.5), 10.5, true},
+		{"int", int(10), 10.0, true},
+		{"int64", int64(10), 10.0, true},
+		{"int32", int32(10), 10.0, true},
+		{"string", "invalid", 0, false},
+		{"nil", nil, 0, false},
+		{"bool", true, 0, false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result, ok := toFloat64(test.input)
+			if ok != test.ok {
+				t.Errorf("toFloat64(%v) ok = %v, expected %v", test.input, ok, test.ok)
+			}
+			if ok && math.Abs(result-test.expected) > 0.0001 {
+				t.Errorf("toFloat64(%v) = %f, expected %f", test.input, result, test.expected)
+			}
+		})
+	}
+}
+
+func TestParseGeoJSONPointWithDifferentNumericTypes(t *testing.T) {
+	tests := []struct {
+		name   string
+		coords []interface{}
+		expLon float64
+		expLat float64
+	}{
+		{"float64", []interface{}{float64(10.5), float64(20.3)}, 10.5, 20.3},
+		{"float32", []interface{}{float32(10.5), float32(20.3)}, 10.5, 20.3},
+		{"int", []interface{}{int(10), int(20)}, 10.0, 20.0},
+		{"int64", []interface{}{int64(10), int64(20)}, 10.0, 20.0},
+		{"int32", []interface{}{int32(10), int32(20)}, 10.0, 20.0},
+		{"mixed", []interface{}{int64(10), float32(20.5)}, 10.0, 20.5},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			data := map[string]interface{}{
+				"type":        "Point",
+				"coordinates": test.coords,
+			}
+			point, err := ParseGeoJSONPoint(data)
+			if err != nil {
+				t.Fatalf("ParseGeoJSONPoint failed: %v", err)
+			}
+			if math.Abs(point.Lon-test.expLon) > 0.0001 || math.Abs(point.Lat-test.expLat) > 0.0001 {
+				t.Errorf("Expected (%f, %f), got (%f, %f)", test.expLon, test.expLat, point.Lon, point.Lat)
+			}
+		})
+	}
+}
+
+func TestParseGeoJSONPointInvalidCoordinateType(t *testing.T) {
+	data := map[string]interface{}{
+		"type":        "Point",
+		"coordinates": []interface{}{"invalid", 20.0},
+	}
+	_, err := ParseGeoJSONPoint(data)
+	if err == nil {
+		t.Error("Expected error for invalid coordinate type")
+	}
+}

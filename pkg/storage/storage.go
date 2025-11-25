@@ -215,6 +215,11 @@ func (se *StorageEngine) Stats() map[string]interface{} {
 	}
 }
 
+// DiskManager returns the disk manager
+func (se *StorageEngine) DiskManager() *DiskManager {
+	return se.diskMgr
+}
+
 // ensureDir creates a directory if it doesn't exist
 func ensureDir(path string) error {
 	return os.MkdirAll(path, 0755)

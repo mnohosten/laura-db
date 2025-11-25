@@ -620,3 +620,68 @@ func TestReadRouterGetSelectedNode(t *testing.T) {
 		t.Errorf("Expected node1, got %v", nodeID)
 	}
 }
+
+// TestReadPreferenceSelectorSelectNearest tests the selectNearest function
+func TestReadPreferenceSelectorSelectNearest(t *testing.T) {
+	// Create database and replica set
+	db, err := database.Open(database.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("Failed to open database: %v", err)
+	}
+	defer db.Close()
+
+	oplogPath := t.TempDir() + "/oplog"
+	config := DefaultReplicaSetConfig("rs0", "node1", db, oplogPath)
+	rs, err := NewReplicaSet(config)
+	if err != nil {
+		t.Fatalf("Failed to create replica set: %v", err)
+	}
+
+	// Add members
+	rs.AddMember("node2", 1, true)
+	rs.AddMember("node3", 1, true)
+
+	// Update heartbeats to make all members healthy
+	rs.UpdateMemberHeartbeat("node2", 0)
+	rs.UpdateMemberHeartbeat("node3", 0)
+
+	// Make node1 primary
+	if err := rs.BecomePrimary(); err != nil {
+		t.Fatalf("Failed to become primary: %v", err)
+	}
+
+	selector := NewReadPreferenceSelector(rs)
+	ctx := context.Background()
+
+	// Test nearest without filters
+	pref := Nearest()
+	nodeID, err := selector.SelectNode(ctx, pref)
+	if err != nil {
+		t.Fatalf("Failed to select nearest node: %v", err)
+	}
+	if nodeID == "" {
+		t.Error("Expected non-empty node ID")
+	}
+
+	// Test nearest with max staleness
+	pref = Nearest().WithMaxStaleness(10)
+	nodeID, err = selector.SelectNode(ctx, pref)
+	if err != nil {
+		t.Fatalf("Failed to select nearest node with max staleness: %v", err)
+	}
+	if nodeID == "" {
+		t.Error("Expected non-empty node ID")
+	}
+
+	// Test successful nearest selection - should select any healthy node
+	pref = Nearest()
+	nodeID, err = selector.SelectNode(ctx, pref)
+	if err != nil {
+		t.Fatalf("Failed to select nearest node: %v", err)
+	}
+	// Should select one of the healthy nodes
+	validNodes := map[string]bool{"node1": true, "node2": true, "node3": true}
+	if !validNodes[nodeID] {
+		t.Errorf("Expected one of node1/node2/node3, got %v", nodeID)
+	}
+}

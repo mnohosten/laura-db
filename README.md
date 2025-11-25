@@ -81,13 +81,19 @@ This project demonstrates how to build a production-grade document database from
 - JSON request/response format
 - Comprehensive middleware stack (logging, CORS, recovery)
 - Support for all database operations via HTTP endpoints
+- **WebSocket API**: Real-time change notifications via WebSocket ✨ **NEW**
+  - Subscribe to database changes in real-time
+  - Filter events by operation type and document fields
+  - Resume tokens for reconnection and recovery
+  - Automatic heartbeat messages
 
 ### Access Modes
 
 1. **Embedded/Library Mode**: Import package directly in Go applications ✅ **Available**
 2. **CLI Mode**: Interactive command-line interface (REPL) for database administration ✅ **Available**
 3. **HTTP Server Mode**: RESTful API server with web-based admin console ✅ **Available**
-4. **Client-Server Mode**: Standalone server with custom binary protocol ⚠️ **Not Yet Implemented**
+4. **Go Client Library**: Native Go HTTP client for connecting to LauraDB servers ✅ **Available** ✨ **NEW**
+5. **Node.js Client Library**: Official Node.js client for JavaScript/TypeScript applications ✅ **Available** ✨ **NEW**
 
 ## Project Structure
 
@@ -107,8 +113,8 @@ laura-db/
 │   ├── database/        # Main database interface
 │   ├── impex/           # Import/export utilities (JSON, CSV)
 │   ├── server/          # HTTP server and handlers
+│   ├── client/          # Go HTTP client library ✨ NEW
 │   └── protocol/        # Network protocol
-├── client/              # Client library for remote access
 ├── examples/            # Example usage code
 ├── docs/                # Detailed documentation
 │   ├── architecture.md  # System architecture
@@ -229,6 +235,167 @@ curl http://localhost:8080/_stats
 - `-cors-origin` - CORS allowed origin (default: "*")
 
 See [HTTP API documentation](docs/http-api.md) for complete API reference.
+
+### Docker Mode
+
+Run LauraDB in Docker with a single command:
+
+```bash
+# Using Docker
+make docker
+
+# Or using Docker Compose
+make compose-up
+```
+
+**Docker Compose with Monitoring:**
+
+```bash
+# Start with Prometheus + Grafana monitoring
+make compose-up-monitoring
+
+# Access:
+# - LauraDB: http://localhost:8080
+# - Prometheus: http://localhost:9090
+# - Grafana: http://localhost:3000 (admin/admin)
+```
+
+**Production Deployment:**
+
+```bash
+# Production mode with resource limits and optimizations
+make compose-up-prod
+```
+
+See [Docker Compose Guide](docs/docker-compose.md) for complete deployment options.
+
+### Go Client Library ✨ NEW
+
+Use the native Go client library to connect to a LauraDB server:
+
+```go
+package main
+
+import (
+    "fmt"
+    "log"
+
+    "github.com/mnohosten/laura-db/pkg/client"
+)
+
+func main() {
+    // Create a client (requires running server)
+    c := client.NewDefaultClient()
+    defer c.Close()
+
+    // Get a collection
+    users := c.Collection("users")
+
+    // Insert a document
+    doc := map[string]interface{}{
+        "name": "Alice",
+        "age":  int64(30),
+        "city": "New York",
+    }
+    id, err := users.InsertOne(doc)
+    if err != nil {
+        log.Fatal(err)
+    }
+    fmt.Printf("Inserted: %s\n", id)
+
+    // Query documents
+    filter := map[string]interface{}{
+        "age": map[string]interface{}{"$gte": int64(25)},
+    }
+    docs, _ := users.Find(filter)
+    fmt.Printf("Found %d documents\n", len(docs))
+
+    // Aggregation pipeline
+    results, _ := client.NewPipeline().
+        Group("$city", map[string]interface{}{
+            "count": client.Count(),
+            "avgAge": client.Avg("age"),
+        }).
+        Execute(users)
+}
+```
+
+**Features:**
+- Full CRUD operations (Insert, Find, Update, Delete)
+- Query operations with filters, projections, sorting, pagination
+- Aggregation pipeline with builder pattern
+- Index management (B-tree, compound, text, geo, TTL, partial)
+- Bulk operations support
+- Connection pooling and timeout configuration
+- Health checks and statistics
+- 37 comprehensive tests
+
+See [Go Client Documentation](docs/go-client.md) for complete API reference.
+
+### Node.js Client Library ✨ NEW
+
+Use the official Node.js client library to connect to a LauraDB server from JavaScript/TypeScript applications:
+
+```javascript
+const { createClient } = require('lauradb-client');
+
+// Create a client
+const client = createClient({
+  host: 'localhost',
+  port: 8080
+});
+
+// Get a collection
+const users = client.collection('users');
+
+// Insert a document
+const id = await users.insertOne({
+  name: 'Alice',
+  age: 30,
+  city: 'New York'
+});
+console.log('Inserted:', id);
+
+// Query documents
+const results = await users.find()
+  .filter({ age: { $gte: 25 } })
+  .sort({ name: 1 })
+  .limit(10)
+  .execute();
+console.log('Found:', results.length);
+
+// Aggregation pipeline
+const stats = await users.aggregate()
+  .match({ age: { $gt: 20 } })
+  .group({
+    _id: '$city',
+    avgAge: { $avg: '$age' },
+    count: { $sum: 1 }
+  })
+  .sort({ avgAge: -1 })
+  .execute();
+
+// Close client
+client.close();
+```
+
+**Features:**
+- Promise-based API with async/await support
+- Full CRUD operations (Insert, Find, Update, Delete)
+- Fluent query builder with filtering, sorting, pagination
+- Aggregation pipeline support
+- Index management (B+ tree, compound, text, geo, TTL, partial)
+- Connection pooling
+- Zero external dependencies (pure Node.js)
+- Comprehensive examples and tests
+
+**Installation:**
+```bash
+cd clients/nodejs
+npm install
+```
+
+See [Node.js Client Documentation](docs/nodejs-client.md) for complete API reference and [clients/nodejs/README.md](clients/nodejs/README.md) for detailed usage.
 
 ### CLI Mode (Interactive REPL)
 

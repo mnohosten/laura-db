@@ -592,3 +592,107 @@ func TestReplicaSetVotingMemberCount(t *testing.T) {
 		t.Errorf("Expected 2 voting members, got %d", count)
 	}
 }
+
+// TestReplicaSetCheckMemberHealth tests the checkMemberHealth function
+func TestReplicaSetCheckMemberHealth(t *testing.T) {
+	db, err := database.Open(database.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("Failed to open database: %v", err)
+	}
+	defer db.Close()
+
+	oplogPath := t.TempDir() + "/oplog"
+	config := DefaultReplicaSetConfig("rs0", "node1", db, oplogPath)
+	config.HeartbeatTimeout = 100 * time.Millisecond
+	config.ElectionTimeout = 200 * time.Millisecond
+
+	rs, err := NewReplicaSet(config)
+	if err != nil {
+		t.Fatalf("Failed to create replica set: %v", err)
+	}
+	defer rs.Stop()
+
+	// Add members
+	if err := rs.AddMember("node2", 1, true); err != nil {
+		t.Fatalf("Failed to add member: %v", err)
+	}
+	if err := rs.AddMember("node3", 1, true); err != nil {
+		t.Fatalf("Failed to add member: %v", err)
+	}
+
+	// Update heartbeats to make all members healthy initially
+	rs.UpdateMemberHeartbeat("node2", 0)
+	rs.UpdateMemberHeartbeat("node3", 0)
+
+	// Verify members are healthy
+	rs.membersMu.RLock()
+	member2 := rs.members["node2"]
+	rs.membersMu.RUnlock()
+
+	member2.mu.RLock()
+	state := member2.State
+	member2.mu.RUnlock()
+
+	if state != StateHealthy {
+		t.Errorf("Expected member2 to be healthy, got %v", state)
+	}
+
+	// Wait for heartbeat timeout to make member unhealthy
+	time.Sleep(150 * time.Millisecond)
+
+	// Call checkMemberHealth
+	rs.checkMemberHealth()
+
+	// Verify member2 is now unreachable
+	rs.membersMu.RLock()
+	member2 = rs.members["node2"]
+	rs.membersMu.RUnlock()
+
+	member2.mu.RLock()
+	state = member2.State
+	member2.mu.RUnlock()
+
+	if state != StateUnreachable {
+		t.Errorf("Expected member2 to be unreachable, got %v", state)
+	}
+}
+
+// TestNodeRoleString tests the NodeRole String method
+func TestNodeRoleString(t *testing.T) {
+	tests := []struct {
+		role NodeRole
+		want string
+	}{
+		{RolePrimary, "PRIMARY"},
+		{RoleSecondary, "SECONDARY"},
+		{RoleArbiter, "ARBITER"},
+		{NodeRole(999), "UNKNOWN"},
+	}
+
+	for _, tt := range tests {
+		got := tt.role.String()
+		if got != tt.want {
+			t.Errorf("NodeRole(%d).String() = %s, want %s", tt.role, got, tt.want)
+		}
+	}
+}
+
+// TestNodeStateString tests the NodeState String method
+func TestNodeStateString(t *testing.T) {
+	tests := []struct {
+		state NodeState
+		want  string
+	}{
+		{StateHealthy, "HEALTHY"},
+		{StateUnhealthy, "UNHEALTHY"},
+		{StateUnreachable, "UNREACHABLE"},
+		{NodeState(999), "UNKNOWN"},
+	}
+
+	for _, tt := range tests {
+		got := tt.state.String()
+		if got != tt.want {
+			t.Errorf("NodeState(%d).String() = %s, want %s", tt.state, got, tt.want)
+		}
+	}
+}

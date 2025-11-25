@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: laura-db-config
+data:
+  LOG_LEVEL: "warn"
+  BUFFER_SIZE: "5000"
+  DOC_CACHE: "5000"
+  WORKER_POOL_SIZE: "8"

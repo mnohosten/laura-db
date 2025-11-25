@@ -16,16 +16,33 @@ type BTree struct {
 	size         int
 	height       int
 	lastSplitKey interface{} // Temporarily stores the separator/promoted key from a split
+
+	// Disk persistence fields
+	rootPageID   uint32      // Root node page ID (0 = in-memory only)
+	indexID      uint32      // Index identifier
+	collectionID uint32      // Collection identifier
+	nodeCache    *NodeCache  // Node cache for frequently accessed nodes
+	diskMgr      interface{} // DiskManager (interface{} to avoid import cycle, will be *storage.DiskManager)
+	isDiskBased  bool        // Whether this tree uses disk persistence
 }
 
 // BTreeNode represents a node in the B+ tree
 type BTreeNode struct {
+	// In-memory structure
 	isLeaf   bool
 	keys     []interface{}
 	values   []interface{} // Only used in leaf nodes
 	children []*BTreeNode  // Only used in internal nodes
 	next     *BTreeNode    // Only used in leaf nodes (linked list)
 	parent   *BTreeNode
+
+	// Disk persistence fields
+	pageID       uint32   // Page containing this node (0 = not persisted)
+	isDirty      bool     // Node modified in memory
+	isLoaded     bool     // Node loaded from disk
+	childPageIDs []uint32 // PageIDs of children (internal nodes, for lazy loading)
+	nextPageID   uint32   // PageID of next leaf (leaf nodes)
+	parentPageID uint32   // PageID of parent node
 }
 
 // NewBTree creates a new B+ tree with the given order

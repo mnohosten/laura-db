@@ -37,80 +37,120 @@ jobs:
     - name: Download dependencies
       run: go mod download
 
+    - name: Build regression tool
+      run: |
+        echo "Building regression detection tool..."
+        go build -o bin/laura-regression ./cmd/regression
+        echo "✓ Regression tool built"
+
     - name: Run benchmarks
       run: |
         echo "Running performance benchmarks..."
-        go test -bench=. -benchmem -benchtime=3s -run=^$ ./pkg/... > benchmark-results.txt 2>&1 || true
+        mkdir -p benchmarks
+        go test -bench=. -benchmem -benchtime=3s -count=5 -run=^$ ./pkg/... > benchmarks/current.txt 2>&1 || true
 
-    - name: Display benchmark results
-      run: |
-        echo "=== Benchmark Results ==="
-        cat benchmark-results.txt
-
-    - name: Extract benchmark summary
-      run: |
+        echo ""
         echo "=== Benchmark Summary ==="
-        grep -E "^Benchmark" benchmark-results.txt | head -20 || echo "No benchmark results found"
+        grep -E "^Benchmark" benchmarks/current.txt | head -20 || echo "No benchmark results found"
+
+    - name: Download baseline benchmark
+      if: github.event_name == 'pull_request' || github.event_name == 'push'
+      continue-on-error: true
+      uses: dawidd6/action-download-artifact@v3
+      with:
+        name: benchmark-baseline
+        path: benchmarks
+        workflow: benchmarks.yml
+        branch: main
+        if_no_artifact_found: warn
 
     - name: Check for performance regressions
-      run: |
-        # This is a placeholder for future regression detection
-        # In a full implementation, this would compare against baseline results
-        echo "Checking for performance regressions..."
-        echo "✓ Benchmark check complete (regression detection coming soon)"
-
-    - name: Upload benchmark results
-      uses: actions/upload-artifact@v4
-      with:
-        name: benchmark-results-${{ github.sha }}
-        path: benchmark-results.txt
-        retention-days: 90
-
-    - name: Comment benchmark results on PR
       if: github.event_name == 'pull_request'
+      continue-on-error: true
+      run: |
+        echo "Checking for performance regressions..."
+
+        if [ -f "benchmarks/baseline.txt" ]; then
+          echo "✓ Baseline found, running regression detection..."
+
+          # Create regression database
+          ./bin/laura-regression baseline --file benchmarks/baseline.txt --db benchmarks --commit baseline
+
+          # Check current results against baseline
+          ./bin/laura-regression check \
+            --file benchmarks/current.txt \
+            --db benchmarks \
+            --threshold default \
+            --format markdown \
+            --fail-on-critical=false \
+            > regression-report.md || echo "Regressions detected"
+
+          echo ""
+          cat regression-report.md
+        else
+          echo "⚠️  No baseline found. This is the first benchmark run."
+          echo "Creating baseline from current results..."
+          ./bin/laura-regression baseline --file benchmarks/current.txt --db benchmarks --commit "${{ github.sha }}"
+          echo "## ✅ Performance Baseline Created" > regression-report.md
+          echo "" >> regression-report.md
+          echo "This is the first benchmark run. Future PRs will be compared against this baseline." >> regression-report.md
+        fi
+
+    - name: Comment regression report on PR
+      if: github.event_name == 'pull_request' && steps.regression-check.outcome != 'failure'
       uses: actions/github-script@v7
       with:
         github-token: ${{ secrets.GITHUB_TOKEN }}
         script: |
           const fs = require('fs');
-          const results = fs.readFileSync('benchmark-results.txt', 'utf8');
 
-          // Extract key benchmarks (first 30 lines of benchmark output)
-          const lines = results.split('\n');
-          const benchmarkLines = lines.filter(l => l.startsWith('Benchmark'));
+          // Read regression report
+          let regressionReport = '';
+          try {
+            regressionReport = fs.readFileSync('regression-report.md', 'utf8');
+          } catch (e) {
+            regressionReport = '## ⚠️  Regression Check Failed\n\nUnable to generate regression report.';
+          }
+
+          // Read full benchmark results for details section
+          const benchResults = fs.readFileSync('benchmarks/current.txt', 'utf8');
+          const benchmarkLines = benchResults.split('\n').filter(l => l.startsWith('Benchmark'));
           const summary = benchmarkLines.slice(0, 30).join('\n');
 
-          if (summary) {
-            const body = `## 📊 Performance Benchmark Results
+          const body = `${regressionReport}
+
+<details>
+<summary>📊 View Full Benchmark Results</summary>
 
 \`\`\`
 ${summary}
 ${benchmarkLines.length > 30 ? `\n... and ${benchmarkLines.length - 30} more benchmarks` : ''}
 \`\`\`
 
-<details>
-<summary>View full results</summary>
-
-\`\`\`
-${results.slice(0, 10000)}
-${results.length > 10000 ? '\n... (truncated, see artifacts for full results)' : ''}
-\`\`\`
-
 </details>
 
-Download the full benchmark report from the workflow artifacts.
+---
+*Performance regression detection powered by LauraDB Regression Tool*
 `;
 
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: body
-            });
-          }
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: body
+          });
 
-  continuous-benchmarking:
-    name: Continuous Benchmark Tracking
+    - name: Upload benchmark results
+      uses: actions/upload-artifact@v4
+      with:
+        name: benchmark-results-${{ github.sha }}
+        path: |
+          benchmarks/current.txt
+          regression-report.md
+        retention-days: 90
+
+  baseline-tracking:
+    name: Update Performance Baseline
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
@@ -123,37 +163,81 @@ Download the full benchmark report from the workflow artifacts.
       with:
         go-version: '1.21'
 
-    - name: Run benchmarks with benchstat format
+    - name: Cache Go modules
+      uses: actions/cache@v4
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Build regression tool
       run: |
+        go build -o bin/laura-regression ./cmd/regression
+
+    - name: Run benchmarks
+      run: |
+        echo "Running baseline benchmarks (5 iterations for stability)..."
         mkdir -p benchmarks
-        go test -bench=. -benchmem -benchtime=3s -count=5 -run=^$ ./pkg/... > benchmarks/current.txt 2>&1 || true
+        go test -bench=. -benchmem -benchtime=3s -count=5 -run=^$ ./pkg/... > benchmarks/baseline.txt 2>&1 || true
 
-    - name: Store benchmark results
+    - name: Create/Update baseline database
       run: |
-        # Create timestamped benchmark file
-        TIMESTAMP=$(date +%Y%m%d-%H%M%S)
         COMMIT_SHA=$(git rev-parse --short HEAD)
-        cp benchmarks/current.txt "benchmarks/bench-${TIMESTAMP}-${COMMIT_SHA}.txt"
-        echo "Stored benchmark results: bench-${TIMESTAMP}-${COMMIT_SHA}.txt"
+        echo "Creating baseline with commit $COMMIT_SHA..."
 
-    - name: Upload benchmark history
+        # Save as baseline
+        ./bin/laura-regression baseline \
+          --file benchmarks/baseline.txt \
+          --db benchmarks \
+          --commit "$COMMIT_SHA"
+
+        echo "✓ Baseline updated"
+
+    - name: Generate historical trend report
+      run: |
+        echo "Generating performance trend report..."
+        ./bin/laura-regression trend --db benchmarks --limit 20 > trend-report.txt || true
+
+        echo ""
+        echo "=== Recent Performance Trends ==="
+        head -100 trend-report.txt || echo "No historical data yet"
+
+    - name: Upload baseline
       uses: actions/upload-artifact@v4
       with:
-        name: benchmark-history-${{ github.sha }}
-        path: benchmarks/
+        name: benchmark-baseline
+        path: benchmarks/baseline.txt
+        retention-days: 365
+
+    - name: Upload benchmark database
+      uses: actions/upload-artifact@v4
+      with:
+        name: benchmark-database-${{ github.sha }}
+        path: benchmarks/*.json
         retention-days: 365
 
     - name: Generate benchmark report
       run: |
         echo "=== LauraDB Performance Benchmarks ===" > benchmark-report.md
         echo "" >> benchmark-report.md
-        echo "Commit: $(git rev-parse --short HEAD)" >> benchmark-report.md
-        echo "Date: $(date)" >> benchmark-report.md
+        echo "**Commit:** $(git rev-parse --short HEAD)" >> benchmark-report.md
+        echo "**Date:** $(date)" >> benchmark-report.md
+        echo "**Branch:** main" >> benchmark-report.md
         echo "" >> benchmark-report.md
         echo "## Key Performance Metrics" >> benchmark-report.md
         echo "" >> benchmark-report.md
         echo "\`\`\`" >> benchmark-report.md
-        grep -E "^Benchmark" benchmarks/current.txt | head -50 >> benchmark-report.md || echo "No results"
+        grep -E "^Benchmark" benchmarks/baseline.txt | head -50 >> benchmark-report.md || echo "No results"
+        echo "\`\`\`" >> benchmark-report.md
+        echo "" >> benchmark-report.md
+        echo "## Historical Trends" >> benchmark-report.md
+        echo "" >> benchmark-report.md
+        echo "\`\`\`" >> benchmark-report.md
+        head -200 trend-report.txt >> benchmark-report.md || echo "No historical data"
         echo "\`\`\`" >> benchmark-report.md
 
     - name: Upload report
@@ -162,3 +246,8 @@ Download the full benchmark report from the workflow artifacts.
         name: benchmark-report-${{ github.sha }}
         path: benchmark-report.md
         retention-days: 90
+
+    - name: Clean old benchmark data
+      run: |
+        echo "Cleaning benchmark data older than 90 days..."
+        ./bin/laura-regression clean --db benchmarks --older-than 90 || true

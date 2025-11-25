@@ -707,3 +707,193 @@ func TestDocumentIDToString(t *testing.T) {
 		})
 	}
 }
+
+// Test NewExecutorWithMap function
+func TestNewExecutorWithMap(t *testing.T) {
+	docMap := make(map[string]*document.Document)
+
+	doc1 := document.NewDocumentFromMap(map[string]interface{}{
+		"_id":  "doc1",
+		"name": "Alice",
+		"age":  int64(30),
+	})
+	doc2 := document.NewDocumentFromMap(map[string]interface{}{
+		"_id":  "doc2",
+		"name": "Bob",
+		"age":  int64(25),
+	})
+
+	docMap["doc1"] = doc1
+	docMap["doc2"] = doc2
+
+	executor := NewExecutorWithMap(docMap)
+
+	if executor == nil {
+		t.Fatal("Expected non-nil executor")
+	}
+
+	if len(executor.documents) != 2 {
+		t.Errorf("Expected 2 documents, got %d", len(executor.documents))
+	}
+
+	if executor.documentsMap == nil {
+		t.Error("Expected documentsMap to be set")
+	}
+
+	if len(executor.indexes) != 0 {
+		t.Error("Expected empty indexes map")
+	}
+}
+
+// Test executeWithCandidates function
+func TestExecuteWithCandidates(t *testing.T) {
+	doc1 := document.NewDocumentFromMap(map[string]interface{}{
+		"_id":  "doc1",
+		"name": "Alice",
+		"age":  int64(30),
+	})
+	doc2 := document.NewDocumentFromMap(map[string]interface{}{
+		"_id":  "doc2",
+		"name": "Bob",
+		"age":  int64(25),
+	})
+	doc3 := document.NewDocumentFromMap(map[string]interface{}{
+		"_id":  "doc3",
+		"name": "Charlie",
+		"age":  int64(35),
+	})
+
+	documents := []*document.Document{doc1, doc2, doc3}
+	executor := NewExecutor(documents)
+
+	// Test filtering with sort, skip, limit
+	query := NewQuery(map[string]interface{}{
+		"age": map[string]interface{}{
+			"$gte": int64(25),
+		},
+	})
+	query.WithSort([]SortField{{Field: "age", Ascending: true}})
+	query.WithSkip(1)
+	query.WithLimit(1)
+
+	results, err := executor.executeWithCandidates(query, documents)
+	if err != nil {
+		t.Fatalf("executeWithCandidates failed: %v", err)
+	}
+
+	if len(results) != 1 {
+		t.Errorf("Expected 1 result after skip/limit, got %d", len(results))
+	}
+
+	if len(results) > 0 {
+		age, _ := results[0].Get("age")
+		if age != int64(30) {
+			t.Errorf("Expected age 30 (Alice, second after sort), got %v", age)
+		}
+	}
+}
+
+// Test executeWithCandidates with skip >= len(results)
+func TestExecuteWithCandidatesSkipAll(t *testing.T) {
+	doc1 := document.NewDocumentFromMap(map[string]interface{}{
+		"_id":  "doc1",
+		"name": "Alice",
+	})
+
+	documents := []*document.Document{doc1}
+	executor := NewExecutor(documents)
+
+	query := NewQuery(map[string]interface{}{})
+	query.WithSkip(10) // Skip more than available
+
+	results, err := executor.executeWithCandidates(query, documents)
+	if err != nil {
+		t.Fatalf("executeWithCandidates failed: %v", err)
+	}
+
+	if len(results) != 0 {
+		t.Errorf("Expected 0 results, got %d", len(results))
+	}
+}
+
+// Test toFloat64 with different numeric types
+func TestToFloat64AllTypes(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    interface{}
+		expected float64
+		ok       bool
+	}{
+		{"float64", float64(42.5), 42.5, true},
+		{"float32", float32(42.5), 42.5, true},
+		{"int", int(42), 42.0, true},
+		{"int32", int32(42), 42.0, true},
+		{"int64", int64(42), 42.0, true},
+		{"uint", uint(42), 42.0, true},
+		{"uint32", uint32(42), 42.0, true},
+		{"uint64", uint64(42), 42.0, true},
+		{"string", "42", 0, false},
+		{"nil", nil, 0, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, ok := toFloat64(tt.input)
+			if ok != tt.ok {
+				t.Errorf("toFloat64(%v) ok = %v, expected %v", tt.input, ok, tt.ok)
+			}
+			if ok && result != tt.expected {
+				t.Errorf("toFloat64(%v) = %v, expected %v", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
+// Test toInt64 with different numeric types
+func TestToInt64AllTypes(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    interface{}
+		expected int64
+		ok       bool
+	}{
+		{"int", int(42), 42, true},
+		{"int32", int32(42), 42, true},
+		{"int64", int64(42), 42, true},
+		{"uint", uint(42), 42, true},
+		{"uint32", uint32(42), 42, true},
+		{"float64", float64(42.9), 42, true},
+		{"string", "42", 0, false},
+		{"nil", nil, 0, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, ok := toInt64(tt.input)
+			if ok != tt.ok {
+				t.Errorf("toInt64(%v) ok = %v, expected %v", tt.input, ok, tt.ok)
+			}
+			if ok && result != tt.expected {
+				t.Errorf("toInt64(%v) = %v, expected %v", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
+// Test intersectSets edge cases
+func TestIntersectSetsEdgeCases(t *testing.T) {
+	executor := NewExecutor([]*document.Document{})
+
+	// Test with empty sets
+	result := executor.intersectSets([]map[string]bool{})
+	if len(result) != 0 {
+		t.Error("Expected empty result for empty input")
+	}
+
+	// Test with single set
+	set1 := map[string]bool{"doc1": true, "doc2": true}
+	result = executor.intersectSets([]map[string]bool{set1})
+	if len(result) != 2 {
+		t.Errorf("Expected 2 items, got %d", len(result))
+	}
+}

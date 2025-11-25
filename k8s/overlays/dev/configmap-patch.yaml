@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: laura-db-config
+data:
+  LOG_LEVEL: "debug"
+  BUFFER_SIZE: "500"
+  DOC_CACHE: "500"

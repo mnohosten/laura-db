@@ -5,26 +5,30 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mnohosten/laura-db/pkg/audit"
 	"github.com/mnohosten/laura-db/pkg/mvcc"
 	"github.com/mnohosten/laura-db/pkg/storage"
 )
 
 // Database represents a database instance
 type Database struct {
-	name         string
-	collections  map[string]*Collection
-	storage      *storage.StorageEngine
-	txnMgr       *mvcc.TransactionManager
-	mu           sync.RWMutex
-	isOpen       bool
-	ttlStopChan  chan struct{} // Channel to signal TTL cleanup goroutine to stop
-	ttlWaitGroup sync.WaitGroup
+	name          string
+	collections   map[string]*Collection
+	storage       *storage.StorageEngine
+	txnMgr        *mvcc.TransactionManager
+	auditLogger   *audit.AuditLogger // Audit logger for tracking operations
+	cursorManager *CursorManager     // Cursor manager for server-side cursors
+	mu            sync.RWMutex
+	isOpen        bool
+	ttlStopChan   chan struct{} // Channel to signal TTL cleanup goroutine to stop
+	ttlWaitGroup  sync.WaitGroup
 }
 
 // Config holds database configuration
 type Config struct {
 	DataDir        string
 	BufferPoolSize int
+	AuditConfig    *audit.Config // Optional audit logging configuration
 }
 
 // DefaultConfig returns default configuration
@@ -49,17 +53,32 @@ func Open(config *Config) (*Database, error) {
 	// Create transaction manager
 	txnMgr := mvcc.NewTransactionManager()
 
+	// Create audit logger if configured
+	var auditLogger *audit.AuditLogger
+	if config.AuditConfig != nil {
+		var err error
+		auditLogger, err = audit.NewAuditLogger(config.AuditConfig)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create audit logger: %w", err)
+		}
+	}
+
 	db := &Database{
-		name:        "default",
-		collections: make(map[string]*Collection),
-		storage:     storageEngine,
-		txnMgr:      txnMgr,
-		isOpen:      true,
-		ttlStopChan: make(chan struct{}),
+		name:          "default",
+		collections:   make(map[string]*Collection),
+		storage:       storageEngine,
+		txnMgr:        txnMgr,
+		auditLogger:   auditLogger,
+		cursorManager: NewCursorManager(),
+		isOpen:        true,
+		ttlStopChan:   make(chan struct{}),
 	}
 
 	// Start TTL cleanup goroutine
 	db.startTTLCleanup()
+
+	// Start cursor cleanup goroutine
+	db.startCursorCleanup()
 
 	return db, nil
 }
@@ -73,36 +92,67 @@ func (db *Database) Collection(name string) *Collection {
 		return coll
 	}
 
+	// Create document store for this collection
+	docStore := NewDocumentStore(db.storage.DiskManager(), 1000) // 1000 documents cache
+
 	// Create new collection
-	coll := NewCollection(name, db.txnMgr)
+	coll := NewCollection(name, db.txnMgr, docStore)
+	coll.database = db.name
+	coll.auditLogger = db.auditLogger
 	db.collections[name] = coll
 	return coll
 }
 
 // CreateCollection explicitly creates a collection
 func (db *Database) CreateCollection(name string) (*Collection, error) {
+	start := time.Now()
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
 	if _, exists := db.collections[name]; exists {
+		if db.auditLogger != nil {
+			db.auditLogger.LogOperation(audit.OperationCreateCollection, name, db.name, "", false, time.Since(start), fmt.Errorf("collection already exists"), nil)
+		}
 		return nil, fmt.Errorf("collection %s already exists", name)
 	}
 
-	coll := NewCollection(name, db.txnMgr)
+	// Create document store for this collection
+	docStore := NewDocumentStore(db.storage.DiskManager(), 1000) // 1000 documents cache
+
+	coll := NewCollection(name, db.txnMgr, docStore)
+	coll.database = db.name
+	coll.auditLogger = db.auditLogger
 	db.collections[name] = coll
+
+	// Log successful collection creation
+	if db.auditLogger != nil {
+		db.auditLogger.LogOperation(audit.OperationCreateCollection, name, db.name, "", true, time.Since(start), nil, nil)
+	}
+
 	return coll, nil
 }
 
 // DropCollection drops a collection
 func (db *Database) DropCollection(name string) error {
+	start := time.Now()
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
 	if _, exists := db.collections[name]; !exists {
-		return fmt.Errorf("collection %s does not exist", name)
+		err := fmt.Errorf("collection %s does not exist", name)
+		if db.auditLogger != nil {
+			db.auditLogger.LogOperation(audit.OperationDropCollection, name, db.name, "", false, time.Since(start), err, nil)
+		}
+		return err
 	}
 
 	delete(db.collections, name)
+
+	// Log successful collection drop
+	if db.auditLogger != nil {
+		db.auditLogger.LogOperation(audit.OperationDropCollection, name, db.name, "", true, time.Since(start), nil, nil)
+	}
+
 	return nil
 }
 
@@ -243,4 +293,32 @@ func (db *Database) cleanupExpiredDocuments() {
 	for _, coll := range db.collections {
 		coll.CleanupExpiredDocuments()
 	}
+}
+
+// startCursorCleanup starts the cursor cleanup goroutine
+func (db *Database) startCursorCleanup() {
+	db.ttlWaitGroup.Add(1)
+	go db.cursorCleanupLoop()
+}
+
+// cursorCleanupLoop runs the cursor cleanup process every 60 seconds
+func (db *Database) cursorCleanupLoop() {
+	defer db.ttlWaitGroup.Done()
+
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			db.cursorManager.CleanupTimedOutCursors()
+		case <-db.ttlStopChan:
+			return
+		}
+	}
+}
+
+// CursorManager returns the database's cursor manager
+func (db *Database) CursorManager() *CursorManager {
+	return db.cursorManager
 }

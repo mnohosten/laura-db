@@ -1074,3 +1074,238 @@ func TestLocalMasterClientSendHeartbeat(t *testing.T) {
 		t.Error("Expected context cancellation error")
 	}
 }
+
+// TestSlaveApplyEntry tests the applyEntry function with various operation types
+func TestSlaveApplyEntry(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create master database
+	masterDB, err := database.Open(database.DefaultConfig(filepath.Join(tmpDir, "master")))
+	if err != nil {
+		t.Fatalf("Failed to open master database: %v", err)
+	}
+	defer masterDB.Close()
+
+	// Create slave database
+	slaveDB, err := database.Open(database.DefaultConfig(filepath.Join(tmpDir, "slave")))
+	if err != nil {
+		t.Fatalf("Failed to open slave database: %v", err)
+	}
+	defer slaveDB.Close()
+
+	// Create master
+	masterConfig := DefaultMasterConfig(masterDB, filepath.Join(tmpDir, "oplog.bin"))
+	master, err := NewMaster(masterConfig)
+	if err != nil {
+		t.Fatalf("Failed to create master: %v", err)
+	}
+	defer master.Stop()
+
+	if err := master.Start(); err != nil {
+		t.Fatalf("Failed to start master: %v", err)
+	}
+
+	// Create slave
+	slaveConfig := &SlaveConfig{
+		SlaveID:      "slave1",
+		MasterClient: NewLocalMasterClient(master),
+		Database:     slaveDB,
+	}
+
+	slave, err := NewSlave(slaveConfig)
+	if err != nil {
+		t.Fatalf("Failed to create slave: %v", err)
+	}
+
+	// Test OpTypeInsert
+	insertEntry := &OplogEntry{
+		OpID:       1,
+		OpType:     OpTypeInsert,
+		Collection: "users",
+		Document:   map[string]interface{}{"name": "Alice", "age": int64(30)},
+	}
+	if err := slave.applyEntry(insertEntry); err != nil {
+		t.Errorf("Failed to apply insert entry: %v", err)
+	}
+
+	// Verify document was inserted
+	coll := slaveDB.Collection("users")
+	docs, err := coll.Find(map[string]interface{}{})
+	if err != nil {
+		t.Fatalf("Failed to find documents: %v", err)
+	}
+	if len(docs) != 1 {
+		t.Errorf("Expected 1 document, got %d", len(docs))
+	}
+
+	// Test OpTypeUpdate
+	updateEntry := &OplogEntry{
+		OpID:       2,
+		OpType:     OpTypeUpdate,
+		Collection: "users",
+		Filter:     map[string]interface{}{"name": "Alice"},
+		Update:     map[string]interface{}{"$set": map[string]interface{}{"age": int64(31)}},
+	}
+	if err := slave.applyEntry(updateEntry); err != nil {
+		t.Errorf("Failed to apply update entry: %v", err)
+	}
+
+	// Test OpTypeDelete
+	deleteEntry := &OplogEntry{
+		OpID:       3,
+		OpType:     OpTypeDelete,
+		Collection: "users",
+		Filter:     map[string]interface{}{"name": "Alice"},
+	}
+	if err := slave.applyEntry(deleteEntry); err != nil {
+		t.Errorf("Failed to apply delete entry: %v", err)
+	}
+
+	// Verify document was deleted
+	docs, err = coll.Find(map[string]interface{}{})
+	if err != nil {
+		t.Fatalf("Failed to find documents: %v", err)
+	}
+	if len(docs) != 0 {
+		t.Errorf("Expected 0 documents after delete, got %d", len(docs))
+	}
+
+	// Test OpTypeCreateCollection
+	createCollEntry := &OplogEntry{
+		OpID:       4,
+		OpType:     OpTypeCreateCollection,
+		Collection: "orders",
+	}
+	if err := slave.applyEntry(createCollEntry); err != nil {
+		t.Errorf("Failed to apply create collection entry: %v", err)
+	}
+
+	// Test OpTypeCreateCollection for existing collection (should not error)
+	if err := slave.applyEntry(createCollEntry); err != nil {
+		t.Errorf("Failed to apply create collection entry for existing collection: %v", err)
+	}
+
+	// Test OpTypeDropCollection
+	dropCollEntry := &OplogEntry{
+		OpID:       5,
+		OpType:     OpTypeDropCollection,
+		Collection: "orders",
+	}
+	if err := slave.applyEntry(dropCollEntry); err != nil {
+		t.Errorf("Failed to apply drop collection entry: %v", err)
+	}
+
+	// Test OpTypeDropCollection for non-existent collection (should not error)
+	if err := slave.applyEntry(dropCollEntry); err != nil {
+		t.Errorf("Failed to apply drop collection entry for non-existent collection: %v", err)
+	}
+
+	// Test OpTypeCreateIndex (no-op for now)
+	createIndexEntry := &OplogEntry{
+		OpID:       6,
+		OpType:     OpTypeCreateIndex,
+		Collection: "users",
+	}
+	if err := slave.applyEntry(createIndexEntry); err != nil {
+		t.Errorf("Failed to apply create index entry: %v", err)
+	}
+
+	// Test OpTypeDropIndex (no-op for now)
+	dropIndexEntry := &OplogEntry{
+		OpID:       7,
+		OpType:     OpTypeDropIndex,
+		Collection: "users",
+	}
+	if err := slave.applyEntry(dropIndexEntry); err != nil {
+		t.Errorf("Failed to apply drop index entry: %v", err)
+	}
+
+	// Test OpTypeNoop
+	noopEntry := &OplogEntry{
+		OpID:   8,
+		OpType: OpTypeNoop,
+	}
+	if err := slave.applyEntry(noopEntry); err != nil {
+		t.Errorf("Failed to apply noop entry: %v", err)
+	}
+
+	// Test unknown operation type
+	unknownEntry := &OplogEntry{
+		OpID:       9,
+		OpType:     100, // Invalid operation type
+		Collection: "users",
+	}
+	err = slave.applyEntry(unknownEntry)
+	if err == nil {
+		t.Error("Expected error for unknown operation type")
+	}
+}
+
+// TestSlaveSendHeartbeat tests the sendHeartbeat function
+func TestSlaveSendHeartbeat(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create master database
+	masterDB, err := database.Open(database.DefaultConfig(filepath.Join(tmpDir, "master")))
+	if err != nil {
+		t.Fatalf("Failed to open master database: %v", err)
+	}
+	defer masterDB.Close()
+
+	// Create slave database
+	slaveDB, err := database.Open(database.DefaultConfig(filepath.Join(tmpDir, "slave")))
+	if err != nil {
+		t.Fatalf("Failed to open slave database: %v", err)
+	}
+	defer slaveDB.Close()
+
+	// Create master
+	masterConfig := DefaultMasterConfig(masterDB, filepath.Join(tmpDir, "oplog.bin"))
+	master, err := NewMaster(masterConfig)
+	if err != nil {
+		t.Fatalf("Failed to create master: %v", err)
+	}
+	defer master.Stop()
+
+	if err := master.Start(); err != nil {
+		t.Fatalf("Failed to start master: %v", err)
+	}
+
+	// Register slave
+	if err := master.RegisterSlave("slave1"); err != nil {
+		t.Fatalf("Failed to register slave: %v", err)
+	}
+
+	// Create slave
+	slaveConfig := &SlaveConfig{
+		SlaveID:      "slave1",
+		MasterClient: NewLocalMasterClient(master),
+		Database:     slaveDB,
+	}
+
+	slave, err := NewSlave(slaveConfig)
+	if err != nil {
+		t.Fatalf("Failed to create slave: %v", err)
+	}
+
+	// Set lastAppliedOpID
+	slave.mu.Lock()
+	slave.lastAppliedOpID = 123
+	slave.mu.Unlock()
+
+	// Call sendHeartbeat
+	slave.sendHeartbeat()
+
+	// Give some time for heartbeat to be processed
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify heartbeat was updated on master
+	info, err := master.GetSlaveInfo("slave1")
+	if err != nil {
+		t.Fatalf("Failed to get slave info: %v", err)
+	}
+
+	if info.LastOpID != 123 {
+		t.Errorf("Expected LastOpID 123, got %d", info.LastOpID)
+	}
+}

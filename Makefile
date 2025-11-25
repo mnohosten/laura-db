@@ -1,4 +1,4 @@
-.PHONY: all build clean test server cli repair examples help
+.PHONY: all build clean test server cli repair examples docker docker-build docker-run docker-stop docker-clean compose compose-up compose-up-monitoring compose-up-prod compose-down compose-down-volumes compose-logs compose-logs-all compose-restart help
 
 # Default target
 all: build
@@ -75,10 +75,16 @@ examples:
 	@echo "✓ Built: bin/auth-demo"
 	@cd examples/prometheus-demo && go build -o ../../bin/prometheus-demo main.go
 	@echo "✓ Built: bin/prometheus-demo"
+	@cd examples/connstring-demo && go build -o ../../bin/connstring-demo main.go
+	@echo "✓ Built: bin/connstring-demo"
 	@cd examples/migration-demo && go build -o ../../bin/migration-demo main.go
 	@echo "✓ Built: bin/migration-demo"
 	@cd examples/tls-demo && go build -o ../../bin/tls-demo main.go
 	@echo "✓ Built: bin/tls-demo"
+	@cd examples/client-demo && go build -o ../../bin/client-demo main.go
+	@echo "✓ Built: bin/client-demo"
+	@cd examples/cursor-demo && go build -o ../../bin/cursor-demo main.go
+	@echo "✓ Built: bin/cursor-demo"
 
 # Run tests
 test:
@@ -195,6 +201,97 @@ memory-analyze:
 memory-clean:
 	@./scripts/memory-profile.sh clean
 
+# Docker targets
+
+# Build Docker image
+docker-build:
+	@echo "Building Docker image..."
+	@docker build -t laura-db:latest .
+	@echo "✓ Docker image built: laura-db:latest"
+
+# Run Docker container
+docker-run:
+	@echo "Running LauraDB in Docker..."
+	@docker run -d \
+		--name laura-db \
+		-p 8080:8080 \
+		-v laura-data:/data \
+		laura-db:latest
+	@echo "✓ LauraDB running at http://localhost:8080"
+	@echo "  Admin console: http://localhost:8080/"
+	@echo "  Health check: http://localhost:8080/_health"
+
+# Stop Docker container
+docker-stop:
+	@echo "Stopping LauraDB container..."
+	@docker stop laura-db || true
+	@docker rm laura-db || true
+	@echo "✓ Container stopped and removed"
+
+# Clean Docker images and volumes
+docker-clean: docker-stop
+	@echo "Cleaning Docker resources..."
+	@docker rmi laura-db:latest || true
+	@docker volume rm laura-data || true
+	@echo "✓ Docker resources cleaned"
+
+# Build and run in one command
+docker: docker-build docker-run
+
+# Docker Compose targets
+
+# Start services with Docker Compose (development)
+compose-up:
+	@echo "Starting LauraDB with Docker Compose..."
+	@docker-compose up -d
+	@echo "✓ LauraDB running at http://localhost:8080"
+	@echo "  Admin console: http://localhost:8080/"
+	@echo "  Health check: http://localhost:8080/_health"
+
+# Start services with monitoring
+compose-up-monitoring:
+	@echo "Starting LauraDB with monitoring stack..."
+	@docker-compose --profile monitoring up -d
+	@echo "✓ LauraDB running at http://localhost:8080"
+	@echo "  Admin console: http://localhost:8080/"
+	@echo "  Prometheus: http://localhost:9090"
+	@echo "  Grafana: http://localhost:3000 (admin/admin)"
+
+# Start services in production mode
+compose-up-prod:
+	@echo "Starting LauraDB in production mode..."
+	@docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+	@echo "✓ LauraDB running in production mode"
+
+# Stop Docker Compose services
+compose-down:
+	@echo "Stopping Docker Compose services..."
+	@docker-compose --profile monitoring down
+	@echo "✓ Services stopped"
+
+# Stop and remove volumes
+compose-down-volumes:
+	@echo "Stopping services and removing volumes..."
+	@docker-compose --profile monitoring down -v
+	@echo "✓ Services stopped and volumes removed"
+
+# View logs
+compose-logs:
+	@docker-compose logs -f laura-db
+
+# View all logs (including monitoring)
+compose-logs-all:
+	@docker-compose logs -f
+
+# Restart services
+compose-restart:
+	@echo "Restarting Docker Compose services..."
+	@docker-compose restart
+	@echo "✓ Services restarted"
+
+# Build and start services
+compose: compose-up
+
 # Clean build artifacts
 clean:
 	@echo "Cleaning..."
@@ -262,9 +359,28 @@ help:
 	@echo "Available Targets:"
 	@echo "  make              Build everything (CLI + repair + examples)"
 	@echo "  make build        Build CLI, repair tool, and examples"
+	@echo "  make server       Build HTTP server ✅"
 	@echo "  make cli          Build CLI tool only ✅"
 	@echo "  make repair       Build repair tool only ✅"
 	@echo "  make examples     Build examples only ✅"
+	@echo ""
+	@echo "Docker:"
+	@echo "  make docker-build Build Docker image ✅"
+	@echo "  make docker-run   Run Docker container ✅"
+	@echo "  make docker-stop  Stop Docker container ✅"
+	@echo "  make docker-clean Remove Docker image and volumes ✅"
+	@echo "  make docker       Build and run in one command ✅"
+	@echo ""
+	@echo "Docker Compose:"
+	@echo "  make compose-up            Start services (development) ✅"
+	@echo "  make compose-up-monitoring Start with Prometheus + Grafana ✅"
+	@echo "  make compose-up-prod       Start in production mode ✅"
+	@echo "  make compose-down          Stop all services ✅"
+	@echo "  make compose-down-volumes  Stop and remove volumes ✅"
+	@echo "  make compose-logs          View LauraDB logs ✅"
+	@echo "  make compose-logs-all      View all service logs ✅"
+	@echo "  make compose-restart       Restart all services ✅"
+	@echo "  make compose               Alias for compose-up ✅"
 	@echo ""
 	@echo "Testing:"
 	@echo "  make test         Run tests ✅"

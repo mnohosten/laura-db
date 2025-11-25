@@ -155,10 +155,31 @@ fmt.Printf("Collections: %v\n", stats["collections"])
 #### `Config` Struct
 ```go
 type Config struct {
-    DataDir        string  // Path to data directory
-    BufferPoolSize int     // Number of pages in buffer pool (default: 1000)
+    DataDir        string        // Path to data directory
+    BufferPoolSize int           // Number of pages in buffer pool (default: 1000)
+    AuditConfig    *audit.Config // Optional audit logging configuration
 }
 ```
+
+**Configuration Fields:**
+
+- **`DataDir`** (string, required)
+  - Path to directory where all database files are stored
+  - LauraDB creates: `data.db` (main data), `wal.log` (write-ahead log), `collections/` (metadata)
+  - Default: `.laura-db` in current directory
+  - Data persists across server restarts
+
+- **`BufferPoolSize`** (int, default: 1000)
+  - Number of 4KB pages to cache in memory
+  - Default 1000 pages = ~4MB of page cache
+  - Higher values = more memory usage but better read performance
+  - Recommended: 2000-5000 for production workloads
+  - Each collection also maintains a separate document cache (LRU)
+
+- **`AuditConfig`** (*audit.Config, optional)
+  - Configuration for audit logging
+  - Set to `nil` to disable audit logging
+  - See [Audit Logging Documentation](audit-logging.md) for details
 
 #### `DefaultConfig(dataDir string) *Config`
 Returns a configuration with sensible defaults.
@@ -167,11 +188,14 @@ Returns a configuration with sensible defaults.
 - `dataDir`: Path to data directory
 
 **Returns:**
-- `*Config`: Configuration with defaults
+- `*Config`: Configuration with defaults (BufferPoolSize: 1000)
 
 **Example:**
 ```go
 config := database.DefaultConfig("./mydata")
+
+// Customize for production workload
+config.BufferPoolSize = 5000  // 20MB buffer pool
 ```
 
 ---
@@ -2463,6 +2487,97 @@ for _, result := range results {
 
 ---
 
+## Performance Characteristics
+
+LauraDB uses disk-based storage with multiple layers of caching for optimal performance.
+
+### Storage Architecture
+
+- **Disk Persistence**: All documents stored on disk using slotted page structure (4KB pages)
+- **Write-Ahead Log (WAL)**: Sequential writes ensure durability before applying changes
+- **Buffer Pool**: LRU cache for frequently accessed pages (configurable via `BufferPoolSize`)
+- **Document Cache**: Per-collection LRU cache for frequently accessed documents
+- **Query Cache**: Per-collection cache for query results (5-minute TTL)
+
+### Expected Performance
+
+Performance varies based on caching efficiency and workload:
+
+| Operation | Cached | Disk (Cold) | Notes |
+|-----------|--------|-------------|-------|
+| InsertOne | ~100-200µs | ~500-1000µs | Includes WAL write |
+| FindOne by _id | ~50-100µs | ~500-1000µs | With document cache |
+| Find (indexed) | ~100-200µs | ~1-2ms | Per matching document |
+| Find (full scan) | ~200-500µs | ~2-5ms | Per page scanned |
+| UpdateOne | ~150-300µs | ~1-2ms | Includes index updates |
+| DeleteOne | ~100-200µs | ~1-2ms | Includes index updates |
+| Index lookup | ~50-100µs | ~500-1000µs | B+ tree traversal |
+| Range scan | ~200-500µs | ~1-5ms | Per page, benefits from prefetching |
+
+**Notes:**
+- "Cached" means data is in buffer pool or document cache
+- "Disk (Cold)" means data must be read from disk
+- Actual performance depends on: hardware (SSD vs HDD), workload patterns, cache hit rates, and document sizes
+- SSDs provide 10-100x faster random access than HDDs
+- Sequential operations (WAL writes, range scans) perform well on both SSDs and HDDs
+
+### Performance Tuning Tips
+
+1. **Buffer Pool Sizing**
+   ```go
+   config := database.DefaultConfig("./data")
+   config.BufferPoolSize = 5000  // Increase for larger datasets (20MB cache)
+   ```
+
+2. **Use Indexes for Queries**
+   ```go
+   // Create index on frequently queried fields
+   coll.CreateIndex("email", true)  // unique index
+   coll.CreateIndex("age", false)   // non-unique index
+   ```
+
+3. **Batch Operations**
+   ```go
+   // Better: Insert multiple documents in one call
+   coll.InsertMany(docs)
+
+   // Avoid: Multiple individual inserts
+   for _, doc := range docs {
+       coll.InsertOne(doc)  // Each insert has overhead
+   }
+   ```
+
+4. **Use Covered Queries**
+   - Queries that can be satisfied entirely from index data (no document fetch)
+   - Create compound indexes matching your query patterns
+   - Use projections to request only indexed fields
+
+5. **Limit Result Sets**
+   ```go
+   options := &database.QueryOptions{
+       Limit: 100,  // Prevent loading too many documents
+   }
+   results, _ := coll.Find(filter, options)
+   ```
+
+6. **Monitor Query Performance**
+   ```go
+   // Use Explain to verify index usage
+   plan := coll.Explain(filter)
+   if plan["indexName"] == nil {
+       log.Println("Warning: Query not using index - consider creating one")
+   }
+   ```
+
+### Scaling Considerations
+
+- **Dataset Size**: LauraDB can handle datasets larger than available RAM through disk storage and caching
+- **Memory Usage**: `(BufferPoolSize × 4KB) + (per-collection document cache) + (query cache)`
+- **Disk Space**: Approximately 1.2-1.5x your actual data size (includes indexes, WAL, and overhead)
+- **Concurrency**: MVCC provides non-blocking reads; multiple readers never block writers
+
+---
+
 ## Additional Resources
 
 - [Getting Started Guide](getting-started.md)
@@ -2471,6 +2586,7 @@ for _, result := range results {
 - [Query Optimization](statistics-optimization.md)
 - [Indexing Guide](indexing.md)
 - [HTTP API Documentation](http-api.md)
+- [Performance Tuning Guide](performance-tuning.md)
 
 ---
 
@@ -2478,4 +2594,4 @@ for _, result := range results {
 
 This documentation is for LauraDB v0.1.0.
 
-Last updated: 2024-01-15
+Last updated: 2025-01-15 (disk storage implementation)

@@ -62,7 +62,11 @@ Pages are the fundamental unit of storage. Each page is 4KB (typical OS page siz
 
 ### Page Types
 
-- **Data Page**: Stores document data
+- **Data Page**: Stores document data using slotted page structure
+  - Slotted page layout for variable-length documents
+  - Slot directory maps slot IDs to document offsets
+  - Supports in-place updates and compaction
+  - Managed by DocumentStore and DocumentPageManager
 - **Index Page**: B+ tree nodes
 - **Free List Page**: Tracks available pages
 - **Overflow Page**: Large documents spanning multiple pages
@@ -329,6 +333,13 @@ fmt.Printf("Buffer pool hit rate: %.2f%%\n",
 | Write page | O(1) + I/O | Mark dirty, flush later |
 | WAL append | O(1) + I/O | Sequential write |
 | Checkpoint | O(n) | Flush all dirty pages |
+
+## Related Documentation
+
+For detailed information on document storage implementation:
+- **[disk-storage-design.md](disk-storage-design.md)**: Slotted page structure and document persistence
+- **[collection-metadata-design.md](collection-metadata-design.md)**: Collection catalog and metadata management
+- **[index-persistence-design.md](index-persistence-design.md)**: B+ tree node persistence
 
 ## Future Enhancements
 

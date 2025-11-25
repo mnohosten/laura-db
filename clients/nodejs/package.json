@@ -1,0 +1,50 @@
+{
+  "name": "lauradb-client",
+  "version": "1.0.0",
+  "description": "Official Node.js client for LauraDB - A MongoDB-like document database",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "scripts": {
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
+    "lint": "eslint lib/**/*.js",
+    "format": "prettier --write \"lib/**/*.js\""
+  },
+  "keywords": [
+    "lauradb",
+    "database",
+    "mongodb",
+    "document",
+    "nosql",
+    "client"
+  ],
+  "author": "LauraDB Team",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mnohosten/laura-db.git",
+    "directory": "clients/nodejs"
+  },
+  "bugs": {
+    "url": "https://github.com/mnohosten/laura-db/issues"
+  },
+  "homepage": "https://github.com/mnohosten/laura-db#readme",
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "eslint": "^8.56.0",
+    "prettier": "^3.1.1"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "coverageDirectory": "coverage",
+    "collectCoverageFrom": [
+      "lib/**/*.js",
+      "!lib/**/*.test.js"
+    ]
+  }
+}

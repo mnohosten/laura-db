@@ -310,3 +310,108 @@ func TestCompressedDocumentAllDataTypes(t *testing.T) {
 		}
 	}
 }
+
+// TestCompressedDocumentDecodeInvalidData tests decoding corrupted compressed data
+func TestCompressedDocumentDecodeInvalidData(t *testing.T) {
+	compDoc, err := NewCompressedDocument(ZstdConfig(3))
+	if err != nil {
+		t.Fatalf("Failed to create compressed document: %v", err)
+	}
+	defer compDoc.Close()
+
+	// Test with invalid compressed data
+	invalidData := []byte("this is not valid compressed data")
+	_, err = compDoc.Decode(invalidData)
+	if err == nil {
+		t.Error("Expected error when decoding invalid compressed data")
+	}
+}
+
+// TestCompressedDocumentNilConfig tests NewCompressedDocument with nil config
+func TestCompressedDocumentNilConfig(t *testing.T) {
+	compDoc, err := NewCompressedDocument(nil)
+	if err != nil {
+		t.Fatalf("NewCompressedDocument(nil) should use default config, got error: %v", err)
+	}
+	defer compDoc.Close()
+
+	// Should work with default config
+	doc := document.NewDocument()
+	doc.Set("test", "value")
+
+	compressed, err := compDoc.Encode(doc)
+	if err != nil {
+		t.Fatalf("Failed to encode with default config: %v", err)
+	}
+
+	decoded, err := compDoc.Decode(compressed)
+	if err != nil {
+		t.Fatalf("Failed to decode with default config: %v", err)
+	}
+
+	if val, ok := decoded.Get("test"); !ok || val != "value" {
+		t.Errorf("Value mismatch after encode/decode with default config")
+	}
+}
+
+// TestGetCompressionStatsEmptyDoc tests GetCompressionStats with empty document
+func TestGetCompressionStatsEmptyDoc(t *testing.T) {
+	compDoc, err := NewCompressedDocument(ZstdConfig(3))
+	if err != nil {
+		t.Fatalf("Failed to create compressed document: %v", err)
+	}
+	defer compDoc.Close()
+
+	// Test with empty document
+	doc := document.NewDocument()
+	stats, err := compDoc.GetCompressionStats(doc)
+	if err != nil {
+		t.Fatalf("Failed to get compression stats for empty document: %v", err)
+	}
+
+	if stats.OriginalSize <= 0 {
+		t.Error("Original size should be positive even for empty document")
+	}
+}
+
+// TestCompressedDocumentMultipleAlgorithms tests document compression with different algorithms
+func TestCompressedDocumentMultipleAlgorithms(t *testing.T) {
+	algorithms := []struct {
+		name   string
+		config *Config
+	}{
+		{"Snappy", SnappyConfig()},
+		{"Zstd", ZstdConfig(3)},
+		{"Gzip", GzipConfig(6)},
+		{"Zlib", &Config{Algorithm: AlgorithmZlib, Level: 6}},
+		{"None", &Config{Algorithm: AlgorithmNone}},
+	}
+
+	doc := document.NewDocument()
+	doc.Set("_id", document.NewObjectID())
+	doc.Set("data", "test data that should compress")
+
+	for _, algo := range algorithms {
+		t.Run(algo.name, func(t *testing.T) {
+			compDoc, err := NewCompressedDocument(algo.config)
+			if err != nil {
+				t.Fatalf("Failed to create compressed document with %s: %v", algo.name, err)
+			}
+			defer compDoc.Close()
+
+			compressed, err := compDoc.Encode(doc)
+			if err != nil {
+				t.Fatalf("Failed to encode with %s: %v", algo.name, err)
+			}
+
+			decoded, err := compDoc.Decode(compressed)
+			if err != nil {
+				t.Fatalf("Failed to decode with %s: %v", algo.name, err)
+			}
+
+			if val, ok := decoded.Get("data"); !ok || val != "test data that should compress" {
+				t.Errorf("Data mismatch with %s algorithm", algo.name)
+			}
+		})
+	}
+}

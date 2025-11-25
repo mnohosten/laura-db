@@ -439,23 +439,46 @@ func TestWorkerPool_IsFull(t *testing.T) {
 
 	// Submit blocking tasks to fill the queue
 	blockChan := make(chan struct{})
+	workerStarted := make(chan struct{})
 
-	// Submit enough tasks to fill queue + 1 being processed by worker
-	// Queue size is 3, so we need at least 4 tasks (1 processing + 3 queued)
-	for i := 0; i < 5; i++ {
+	// Submit first task and wait for it to start processing
+	submitted := pool.Submit(TaskFunc(func() error {
+		close(workerStarted)
+		<-blockChan
+		return nil
+	}))
+	if !submitted {
+		t.Fatal("Failed to submit first task")
+	}
+
+	// Wait for worker to start processing the first task
+	<-workerStarted
+	time.Sleep(10 * time.Millisecond) // Extra time to ensure worker is blocked
+
+	// Now submit 3 more tasks to fill the queue (they should all succeed)
+	for i := 0; i < 3; i++ {
 		submitted := pool.Submit(TaskFunc(func() error {
 			<-blockChan
 			return nil
 		}))
-		if !submitted && i < 4 {
-			t.Logf("Task %d was not submitted (expected for 5th task)", i)
+		if !submitted {
+			t.Errorf("Task %d should have been accepted but was rejected", i+1)
 		}
 	}
 
-	// Give tasks time to queue up
-	time.Sleep(50 * time.Millisecond)
+	// Try to submit one more task - this should fail since queue is full
+	submitted = pool.Submit(TaskFunc(func() error {
+		<-blockChan
+		return nil
+	}))
+	if submitted {
+		t.Error("Expected 5th task to be rejected but it was accepted")
+	}
 
-	// Now pool should be full (3 items in queue)
+	// Give a moment for queue state to stabilize
+	time.Sleep(10 * time.Millisecond)
+
+	// Now pool should be full (3 items in queue, 1 being processed)
 	if !pool.IsFull() {
 		stats := pool.Stats()
 		t.Logf("Queue size: %d, Capacity: %d", stats.QueuedTasks, cap(pool.taskQueue))

@@ -79,18 +79,22 @@ func (s *Session) CommitTransaction() error {
 			coll.mu.Lock()
 			idVal, _ := op.doc.Get("_id")
 			idStr := fmt.Sprintf("%v", idVal)
-			if doc, exists := coll.documents[idStr]; exists {
-				// Apply the update operators
-				for key, value := range op.doc.ToMap() {
-					doc.Set(key, value)
-				}
+			// Update in document store
+			if err := coll.docStore.Update(idStr, op.doc); err != nil {
+				coll.mu.Unlock()
+				// Continue even on error since this is already committed in MVCC
+				continue
 			}
 			coll.mu.Unlock()
 
 		case "delete":
 			// Delete the document from the collection
 			coll.mu.Lock()
-			delete(coll.documents, op.docID)
+			if err := coll.docStore.Delete(op.docID); err != nil {
+				coll.mu.Unlock()
+				// Continue even on error since this is already committed in MVCC
+				continue
+			}
 			coll.mu.Unlock()
 		}
 	}
@@ -126,7 +130,7 @@ func (s *Session) InsertOne(collName string, doc map[string]interface{}) (string
 	// Check if document already exists in the collection
 	coll := s.db.Collection(collName)
 	coll.mu.RLock()
-	_, exists := coll.documents[id]
+	exists := coll.docStore.Exists(id)
 	coll.mu.RUnlock()
 
 	if exists {

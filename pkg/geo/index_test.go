@@ -284,3 +284,101 @@ func TestIndex2DSphere_HaversineAccuracy(t *testing.T) {
 			laDistance, expectedMin, expectedMax)
 	}
 }
+
+// TestNewIndex2DWithZeroGridSize tests NewIndex2D with invalid grid size
+func TestNewIndex2DWithZeroGridSize(t *testing.T) {
+	idx := NewIndex2D(0)
+	if idx.gridSize != 1.0 {
+		t.Errorf("Expected default grid size 1.0, got %f", idx.gridSize)
+	}
+}
+
+// TestNewIndex2DWithNegativeGridSize tests NewIndex2D with negative grid size
+func TestNewIndex2DWithNegativeGridSize(t *testing.T) {
+	idx := NewIndex2D(-5.0)
+	if idx.gridSize != 1.0 {
+		t.Errorf("Expected default grid size 1.0, got %f", idx.gridSize)
+	}
+}
+
+// TestNewIndex2DSphereWithZeroGridSize tests NewIndex2DSphere with invalid grid size
+func TestNewIndex2DSphereWithZeroGridSize(t *testing.T) {
+	idx := NewIndex2DSphere(0)
+	if idx.gridSize != 1.0 {
+		t.Errorf("Expected default grid size 1.0, got %f", idx.gridSize)
+	}
+}
+
+// TestNewIndex2DSphereWithNegativeGridSize tests NewIndex2DSphere with negative grid size
+func TestNewIndex2DSphereWithNegativeGridSize(t *testing.T) {
+	idx := NewIndex2DSphere(-5.0)
+	if idx.gridSize != 1.0 {
+		t.Errorf("Expected default grid size 1.0, got %f", idx.gridSize)
+	}
+}
+
+// TestIndex2DUpdateBounds tests the updateBounds function
+func TestIndex2DUpdateBounds(t *testing.T) {
+	idx := NewIndex2D(1.0)
+
+	// Insert first point - should initialize bounds
+	idx.Insert("p1", NewPoint(5, 5))
+	if idx.bounds.MinLon != 5 || idx.bounds.MaxLon != 5 || idx.bounds.MinLat != 5 || idx.bounds.MaxLat != 5 {
+		t.Errorf("First point should set all bounds to (5,5), got min=(%f,%f) max=(%f,%f)",
+			idx.bounds.MinLon, idx.bounds.MinLat, idx.bounds.MaxLon, idx.bounds.MaxLat)
+	}
+
+	// Insert point that extends bounds
+	idx.Insert("p2", NewPoint(10, 15))
+	if idx.bounds.MinLon != 5 || idx.bounds.MaxLon != 10 || idx.bounds.MinLat != 5 || idx.bounds.MaxLat != 15 {
+		t.Errorf("Expected bounds min=(5,5) max=(10,15), got min=(%f,%f) max=(%f,%f)",
+			idx.bounds.MinLon, idx.bounds.MinLat, idx.bounds.MaxLon, idx.bounds.MaxLat)
+	}
+
+	// Insert point that extends bounds in opposite direction
+	idx.Insert("p3", NewPoint(0, 0))
+	if idx.bounds.MinLon != 0 || idx.bounds.MaxLon != 10 || idx.bounds.MinLat != 0 || idx.bounds.MaxLat != 15 {
+		t.Errorf("Expected bounds min=(0,0) max=(10,15), got min=(%f,%f) max=(%f,%f)",
+			idx.bounds.MinLon, idx.bounds.MinLat, idx.bounds.MaxLon, idx.bounds.MaxLat)
+	}
+}
+
+// TestPolygonBoundsWithEmptyRings tests bounds calculation with empty polygon
+func TestPolygonBoundsWithEmptyRings(t *testing.T) {
+	polygon := NewPolygon([][]Point{})
+	bounds := polygon.Bounds()
+
+	// Empty polygon should return nil bounds
+	if bounds != nil {
+		t.Errorf("Empty polygon should return nil bounds, got %v", bounds)
+	}
+}
+
+// TestPolygonBoundsWithMultipleRings tests bounds calculation with multiple rings (holes)
+func TestPolygonBoundsWithMultipleRings(t *testing.T) {
+	outer := []Point{
+		{Lon: 0, Lat: 0},
+		{Lon: 20, Lat: 0},
+		{Lon: 20, Lat: 20},
+		{Lon: 0, Lat: 20},
+		{Lon: 0, Lat: 0},
+	}
+
+	// Hole is inside outer ring, should not affect bounds
+	hole := []Point{
+		{Lon: 5, Lat: 5},
+		{Lon: 10, Lat: 5},
+		{Lon: 10, Lat: 10},
+		{Lon: 5, Lat: 10},
+		{Lon: 5, Lat: 5},
+	}
+
+	polygon := NewPolygon([][]Point{outer, hole})
+	bounds := polygon.Bounds()
+
+	// Bounds should be determined by outer ring only
+	if bounds.MinLon != 0 || bounds.MaxLon != 20 || bounds.MinLat != 0 || bounds.MaxLat != 20 {
+		t.Errorf("Expected bounds min=(0,0) max=(20,20), got min=(%f,%f) max=(%f,%f)",
+			bounds.MinLon, bounds.MinLat, bounds.MaxLon, bounds.MaxLat)
+	}
+}

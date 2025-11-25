@@ -1,0 +1,96 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: laura-db
+  namespace: laura-db
+  labels:
+    app: laura-db
+spec:
+  serviceName: laura-db-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app: laura-db
+  template:
+    metadata:
+      labels:
+        app: laura-db
+    spec:
+      containers:
+      - name: laura-db
+        image: laura-db:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 8080
+          protocol: TCP
+        env:
+        - name: PORT
+          valueFrom:
+            configMapKeyRef:
+              name: laura-db-config
+              key: PORT
+        - name: DATA_DIR
+          valueFrom:
+            configMapKeyRef:
+              name: laura-db-config
+              key: DATA_DIR
+        - name: BUFFER_SIZE
+          valueFrom:
+            configMapKeyRef:
+              name: laura-db-config
+              key: BUFFER_SIZE
+        - name: DOC_CACHE
+          valueFrom:
+            configMapKeyRef:
+              name: laura-db-config
+              key: DOC_CACHE
+        - name: ADMIN_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: laura-db-secret
+              key: admin-username
+        - name: ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: laura-db-secret
+              key: admin-password
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /_health
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /_health
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+      labels:
+        app: laura-db
+    spec:
+      accessModes:
+        - ReadWriteOnce
+      resources:
+        requests:
+          storage: 10Gi
+      # Uncomment and specify storage class if needed
+      # storageClassName: standard

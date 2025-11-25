@@ -2,6 +2,7 @@ package compression
 
 import (
 	"bytes"
+	"encoding/binary"
 	"testing"
 
 	"github.com/mnohosten/laura-db/pkg/storage"
@@ -298,5 +299,59 @@ func TestCompressedPageDifferentTypes(t *testing.T) {
 				t.Errorf("Page type mismatch: got %v, want %v", decompressed.Type, pageType)
 			}
 		})
+	}
+}
+
+// TestCompressedPageSizeMismatch tests error handling for size mismatches
+func TestCompressedPageSizeMismatch(t *testing.T) {
+	compPage, err := NewCompressedPage(ZstdConfig(3))
+	if err != nil {
+		t.Fatalf("Failed to create compressed page: %v", err)
+	}
+	defer compPage.Close()
+
+	page := storage.NewPage(1, storage.PageTypeData)
+	copy(page.Data, []byte("test data"))
+
+	compressed, err := compPage.CompressPage(page)
+	if err != nil {
+		t.Fatalf("Failed to compress page: %v", err)
+	}
+
+	// Corrupt the compressed size in header
+	if len(compressed) > CompressedPageHeaderSize {
+		// Change compressed size to wrong value (make it larger)
+		binary.LittleEndian.PutUint32(compressed[5:9], uint32(len(compressed)))
+
+		_, err = compPage.DecompressPage(compressed)
+		if err == nil {
+			t.Error("Expected error for compressed size mismatch")
+		}
+	}
+}
+
+// TestCompressedPageNilConfig tests NewCompressedPage with nil config
+func TestCompressedPageNilConfig(t *testing.T) {
+	compPage, err := NewCompressedPage(nil)
+	if err != nil {
+		t.Fatalf("NewCompressedPage(nil) should use default config, got error: %v", err)
+	}
+	defer compPage.Close()
+
+	page := storage.NewPage(1, storage.PageTypeData)
+	copy(page.Data, []byte("test"))
+
+	compressed, err := compPage.CompressPage(page)
+	if err != nil {
+		t.Fatalf("Failed to compress with default config: %v", err)
+	}
+
+	decompressed, err := compPage.DecompressPage(compressed)
+	if err != nil {
+		t.Fatalf("Failed to decompress with default config: %v", err)
+	}
+
+	if !bytes.Equal(decompressed.Data, page.Data) {
+		t.Error("Data mismatch with default config")
 	}
 }

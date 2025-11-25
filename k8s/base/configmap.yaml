@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: laura-db-config
+  namespace: laura-db
+  labels:
+    app: laura-db
+data:
+  # Server Configuration
+  PORT: "8080"
+  DATA_DIR: "/data"
+
+  # Storage Configuration
+  BUFFER_SIZE: "1000"
+  DOC_CACHE: "1000"
+
+  # Performance Settings
+  WORKER_POOL_SIZE: "4"
+
+  # Logging
+  LOG_LEVEL: "info"
+
+  # Health Check
+  HEALTH_CHECK_INTERVAL: "30s"

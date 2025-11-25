@@ -11,6 +11,12 @@ const (
 	// EncryptedPageHeaderSize is the size of the encrypted page header
 	// [1-byte algorithm][4-byte original size]
 	EncryptedPageHeaderSize = 5
+
+	// EncryptionOverhead is the maximum overhead from encryption
+	// GCM: 12 bytes (nonce) + 16 bytes (auth tag) = 28 bytes
+	// CTR: 16 bytes (IV) = 16 bytes
+	// We use the larger value for safety
+	EncryptionOverhead = 28
 )
 
 // EncryptedDiskManager wraps a DiskManager with transparent encryption
@@ -87,8 +93,12 @@ func (edm *EncryptedDiskManager) ReadPage(pageID storage.PageID) (*storage.Page,
 			pageID, originalSize, len(decryptedData))
 	}
 
-	// Update page data
-	encryptedPage.Data = decryptedData
+	// Create properly sized page data buffer and copy decrypted data
+	pageDataSize := storage.PageSize - storage.PageHeaderSize
+	newPageData := make([]byte, pageDataSize)
+	copy(newPageData, decryptedData)
+	encryptedPage.Data = newPageData
+
 	return encryptedPage, nil
 }
 
@@ -117,8 +127,17 @@ func (edm *EncryptedDiskManager) WritePage(page *storage.Page) error {
 
 	// Build encrypted page data with header
 	// Header: [1-byte algorithm][4-byte original size]
+	// We need to ensure the page data fits in the page (4KB - header size)
 	headerSize := EncryptedPageHeaderSize
-	encryptedPage.Data = make([]byte, headerSize+len(encryptedData))
+	totalEncryptedSize := headerSize + len(encryptedData)
+
+	// If encrypted data is too large, we have a problem
+	pageDataSize := storage.PageSize - storage.PageHeaderSize
+	if totalEncryptedSize > pageDataSize {
+		return fmt.Errorf("encrypted data too large: %d bytes (max %d)", totalEncryptedSize, pageDataSize)
+	}
+
+	encryptedPage.Data = make([]byte, pageDataSize)
 	encryptedPage.Data[0] = byte(edm.encryptor.config.Algorithm)
 	binary.LittleEndian.PutUint32(encryptedPage.Data[1:5], uint32(len(page.Data)))
 	copy(encryptedPage.Data[headerSize:], encryptedData)

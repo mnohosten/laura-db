@@ -20,7 +20,9 @@ The HTTP server is production-ready with a complete web-based admin interface ac
 
 ## Project Overview
 
-LauraDB is an educational MongoDB-like document database written in Go. It demonstrates production-grade database internals including storage engines, MVCC transactions, B+ tree indexing, query processing, and crash recovery. The project is fully tested (76/76 tests passing) and production-ready for embedded/library mode.
+LauraDB is an educational MongoDB-like document database written in Go. It demonstrates production-grade database internals including storage engines, MVCC transactions, B+ tree indexing, query processing, and crash recovery. The project is fully tested (695+ tests passing) with comprehensive features.
+
+**Current Status**: Documents are persisted to disk using a slotted page structure. The database supports datasets larger than memory with LRU caching for performance. All data survives server restarts through the Write-Ahead Log (WAL) and disk-based storage.
 
 ## Development Commands
 
@@ -199,7 +201,11 @@ Aggregation operators: `$sum`, `$avg`, `$min`, `$max`, `$count`, `$push`
 - Collection creation and lifecycle
 
 #### Collection (`collection.go`)
-- Document storage in-memory map (`_id` → Document)
+- **Document storage**:
+  - **Disk-based storage**: Documents persisted using slotted page structure (`DocumentStore`)
+  - **Location tracking**: Document IDs mapped to disk locations (PageID + SlotID)
+  - **Caching**: LRU document cache for frequently accessed documents
+  - **Persistence**: All documents survive server restarts via WAL and disk pages
 - Index management (B+ tree, text, geo, TTL)
 - CRUD operations: InsertOne, InsertMany, Find, FindOne, UpdateOne, UpdateMany, DeleteOne, DeleteMany
 - Query cache per collection
@@ -210,6 +216,13 @@ Aggregation operators: `$sum`, `$avg`, `$min`, `$max`, `$count`, `$push`
 - Partial indexes require filter matching check before insertion
 - Compound indexes extract composite keys from multiple fields
 - Default `_id_` index is automatically created for every collection
+
+**Disk storage configuration:**
+- **Buffer pool size**: Default 1000 pages (4MB), configurable via `StorageEngine`
+- **Document cache size**: Default per-collection LRU cache, size configurable in `NewDocumentStore`
+- **Page size**: Fixed 4KB (4096 bytes) matching typical OS page size
+- **WAL**: Automatic write-ahead logging for durability, synced on commit
+- **Data directory**: All data files stored in configured directory (`.laura-db` by default)
 
 ## Code Patterns and Conventions
 
@@ -309,13 +322,11 @@ When adding features:
 
 ## Known Limitations
 
-- **In-memory storage**: Documents stored in memory (storage engine used for WAL/recovery)
-- **Admin web console not implemented**: Optional enhancement for web-based database management
-- **HTTP server integration tests missing**: Recommended but not critical for functionality
+### Architectural Limitations
 - **Single database**: Only one database instance per data directory
-- **No authentication**: No user auth or access control
-- **No replication**: Single-node only
-- **No sharding**: All data on one node
+- **No authentication in embedded mode**: Auth available in HTTP server mode only
+- **Single-node disk storage**: Replication/sharding implemented at application level, not storage level
+- **MVCC on disk**: MVCC version chains currently in-memory; disk persistence planned for future enhancement
 
 ## Module Information
 

@@ -9,9 +9,11 @@ The document database provides a RESTful HTTP API similar to Elasticsearch for q
 - [Health & Admin Endpoints](#health--admin-endpoints)
 - [Document Operations](#document-operations)
 - [Query & Search](#query--search)
+- [Cursor API](#cursor-api)
 - [Aggregation](#aggregation)
 - [Collection Management](#collection-management)
 - [Index Management](#index-management)
+- [WebSocket API](#websocket-api)
 
 ## Getting Started
 
@@ -294,6 +296,99 @@ Content-Type: application/json
 }
 ```
 
+### Bulk Write
+
+Perform multiple insert, update, and delete operations in a single request. This is more efficient than executing operations individually and allows for complex multi-operation workflows.
+
+```bash
+POST /{collection}/_bulkWrite
+Content-Type: application/json
+
+{
+  "operations": [
+    {
+      "type": "insert",
+      "document": {
+        "name": "Alice",
+        "age": 25
+      }
+    },
+    {
+      "type": "update",
+      "filter": {"name": "Bob"},
+      "update": {"$set": {"age": 36}}
+    },
+    {
+      "type": "delete",
+      "filter": {"name": "Charlie"}
+    }
+  ]
+}
+```
+
+**Query Parameters:**
+- `ordered` (optional): If set to "false", continues executing remaining operations even if one fails. Default is "true" (stops on first error).
+
+**Response (Success):**
+```json
+{
+  "ok": true,
+  "result": {
+    "insertedCount": 1,
+    "modifiedCount": 1,
+    "deletedCount": 1,
+    "insertedIds": ["6920293a55a5f4f005000005"],
+    "errors": []
+  }
+}
+```
+
+**Response (With Errors):**
+```json
+{
+  "ok": false,
+  "error": "BulkWriteError",
+  "message": "bulk write failed at operation 1: ...",
+  "code": 207,
+  "insertedCount": 1,
+  "modifiedCount": 0,
+  "deletedCount": 0,
+  "insertedIds": ["6920293a55a5f4f005000005"],
+  "errors": [
+    "operation 1: update requires filter and update"
+  ]
+}
+```
+
+**Operation Types:**
+- `insert`: Inserts a new document
+  - Required fields: `document`
+- `update`: Updates documents matching a filter
+  - Required fields: `filter`, `update`
+- `delete`: Deletes documents matching a filter
+  - Required fields: `filter`
+
+**Ordered vs. Unordered:**
+- **Ordered** (default): Operations are executed sequentially. If an operation fails, remaining operations are not executed.
+- **Unordered** (`?ordered=false`): All operations are attempted regardless of failures. Useful for maximizing throughput when individual operation failures are acceptable.
+
+**Example: Unordered Bulk Write**
+```bash
+POST /users/_bulkWrite?ordered=false
+Content-Type: application/json
+
+{
+  "operations": [
+    {"type": "insert", "document": {"name": "User1"}},
+    {"type": "insert", "document": {"name": "User2"}},
+    {"type": "insert", "document": {"_id": "duplicate"}},
+    {"type": "insert", "document": {"name": "User3"}}
+  ]
+}
+```
+
+In unordered mode, even if the third operation fails (duplicate key), operations 1, 2, and 4 will still be executed.
+
 ## Query & Search
 
 ### Search Documents
@@ -414,6 +509,139 @@ You can also use GET for counting all documents:
 ```bash
 GET /{collection}/_count
 ```
+
+## Cursor API
+
+Cursors provide efficient iteration over large result sets without loading all documents into memory at once. They are ideal for pagination and processing large datasets.
+
+### Create Cursor
+
+Creates a new server-side cursor for iterating over query results in batches.
+
+```bash
+POST /_cursors
+Content-Type: application/json
+
+{
+  "collection": "users",
+  "filter": {"age": {"$gte": 18}},
+  "projection": {"name": true, "email": true},
+  "sort": [{"field": "name", "order": "asc"}],
+  "limit": 1000,
+  "skip": 0,
+  "batchSize": 50,
+  "timeout": "5m"
+}
+```
+
+**Request Fields:**
+- `collection` (required): Name of the collection to query
+- `filter` (optional): Query filter (default: `{}`)
+- `projection` (optional): Fields to include/exclude
+- `sort` (optional): Array of sort specifications
+- `limit` (optional): Maximum number of documents to return
+- `skip` (optional): Number of documents to skip
+- `batchSize` (optional): Documents per batch (default: 100)
+- `timeout` (optional): Cursor idle timeout (default: "10m")
+
+**Response:**
+```json
+{
+  "ok": true,
+  "result": {
+    "cursorId": "8e6d04d2a499dbe294893621d5d2c04c",
+    "count": 523,
+    "batchSize": 50
+  }
+}
+```
+
+### Fetch Batch
+
+Retrieves the next batch of documents from a cursor.
+
+```bash
+GET /_cursors/{cursorId}/batch
+```
+
+**Response:**
+```json
+{
+  "ok": true,
+  "result": {
+    "documents": [
+      {"_id": "...", "name": "Alice", "email": "alice@example.com"},
+      {"_id": "...", "name": "Bob", "email": "bob@example.com"}
+    ],
+    "position": 50,
+    "remaining": 473,
+    "hasMore": true
+  }
+}
+```
+
+**Response Fields:**
+- `documents`: Array of documents in this batch
+- `position`: Current position in the result set
+- `remaining`: Number of documents remaining
+- `hasMore`: Whether there are more documents to fetch
+
+### Close Cursor
+
+Closes and removes a cursor to free up server resources.
+
+```bash
+DELETE /_cursors/{cursorId}
+```
+
+**Response:**
+```json
+{
+  "ok": true,
+  "result": {
+    "ok": true
+  }
+}
+```
+
+### Example: Paginating Through Results
+
+```bash
+# Create cursor
+curl -X POST http://localhost:8080/_cursors \
+  -H "Content-Type: application/json" \
+  -d '{
+    "collection": "users",
+    "filter": {"status": "active"},
+    "batchSize": 100
+  }'
+
+# Response: {"ok": true, "result": {"cursorId": "abc123...", ...}}
+
+# Fetch first batch
+curl http://localhost:8080/_cursors/abc123.../batch
+
+# Fetch second batch
+curl http://localhost:8080/_cursors/abc123.../batch
+
+# Close cursor when done
+curl -X DELETE http://localhost:8080/_cursors/abc123...
+```
+
+### Cursor Lifecycle
+
+- **Creation**: Cursor executes the query and stores results in memory
+- **Idle Timeout**: Cursors expire after the specified timeout period of inactivity
+- **Auto-cleanup**: Expired cursors are automatically removed every 60 seconds
+- **Manual Close**: Always close cursors when finished to free resources immediately
+
+### Best Practices
+
+1. **Choose appropriate batch sizes**: Larger batches reduce network overhead but increase memory usage
+2. **Close cursors explicitly**: Don't rely on timeout for cleanup
+3. **Monitor active cursors**: Use `GET /_stats` to track cursor usage
+4. **Use shorter timeouts for interactive queries**: Prevent resource leaks from abandoned cursors
+5. **Consider skip/limit for simple pagination**: Cursors are best for large result sets
 
 ## Aggregation
 
@@ -786,3 +1014,228 @@ type Config struct {
     LogFormat       string
 }
 ```
+
+## WebSocket API
+
+LauraDB provides a WebSocket API for receiving real-time change notifications from the database.
+
+### Change Streams Endpoint
+
+**WebSocket Endpoint**: `GET /_ws/watch`
+
+Establish a WebSocket connection to receive real-time change events from the database.
+
+#### Connection Request
+
+After establishing the WebSocket connection, send a JSON subscription request:
+
+```json
+{
+  "database": "mydb",
+  "collection": "users",
+  "filter": {
+    "operationType": "insert"
+  },
+  "pipeline": [],
+  "resumeToken": null
+}
+```
+
+**Parameters:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `database` | string | Yes | Database name (empty = all databases) |
+| `collection` | string | No | Collection name (empty = all collections) |
+| `filter` | object | No | Query filter for events |
+| `pipeline` | array | No | Aggregation pipeline for transforming events |
+| `resumeToken` | object | No | Resume token to continue from previous position |
+
+#### Response Messages
+
+The server sends JSON messages with the following structure:
+
+```json
+{
+  "type": "event|connected|heartbeat|error",
+  "event": { /* change event */ },
+  "error": "error message",
+  "message": "status message"
+}
+```
+
+**Message Types:**
+
+- **`connected`**: Subscription established successfully
+- **`event`**: Contains a change event
+- **`heartbeat`**: Keepalive message (sent every 30 seconds)
+- **`error`**: Error occurred (connection will be closed)
+
+#### Example: JavaScript Client
+
+```javascript
+const ws = new WebSocket('ws://localhost:8080/_ws/watch');
+
+ws.onopen = () => {
+  // Subscribe to changes
+  ws.send(JSON.stringify({
+    database: 'mydb',
+    collection: 'users',
+    filter: {
+      operationType: 'insert'
+    }
+  }));
+};
+
+ws.onmessage = (event) => {
+  const response = JSON.parse(event.data);
+
+  switch (response.type) {
+    case 'connected':
+      console.log('Subscribed successfully');
+      break;
+    case 'event':
+      console.log('Change event:', response.event);
+      break;
+    case 'heartbeat':
+      // Connection is alive
+      break;
+    case 'error':
+      console.error('Error:', response.error);
+      break;
+  }
+};
+
+ws.onerror = (error) => {
+  console.error('WebSocket error:', error);
+};
+
+ws.onclose = () => {
+  console.log('Connection closed');
+};
+```
+
+#### Change Event Format
+
+Change events follow the MongoDB change stream format:
+
+**Insert Event:**
+```json
+{
+  "_id": { "opId": 1 },
+  "operationType": "insert",
+  "clusterTime": "2025-01-24T10:30:00Z",
+  "db": "mydb",
+  "coll": "users",
+  "documentKey": { "_id": "user1" },
+  "fullDocument": {
+    "_id": "user1",
+    "name": "Alice",
+    "age": 30
+  }
+}
+```
+
+**Update Event:**
+```json
+{
+  "_id": { "opId": 2 },
+  "operationType": "update",
+  "clusterTime": "2025-01-24T10:30:01Z",
+  "db": "mydb",
+  "coll": "users",
+  "documentKey": { "_id": "user1" },
+  "updateDescription": {
+    "updatedFields": { "age": 31 },
+    "removedFields": ["email"]
+  }
+}
+```
+
+**Delete Event:**
+```json
+{
+  "_id": { "opId": 3 },
+  "operationType": "delete",
+  "clusterTime": "2025-01-24T10:30:02Z",
+  "db": "mydb",
+  "coll": "users",
+  "documentKey": { "_id": "user1" }
+}
+```
+
+#### Filtering Events
+
+Filter events by operation type:
+
+```json
+{
+  "database": "mydb",
+  "collection": "users",
+  "filter": {
+    "operationType": { "$in": ["insert", "update"] }
+  }
+}
+```
+
+Filter by document fields:
+
+```json
+{
+  "database": "mydb",
+  "collection": "users",
+  "filter": {
+    "fullDocument.age": { "$gte": 18 }
+  }
+}
+```
+
+#### Resume Tokens
+
+Resume tokens allow you to continue watching from a specific point after reconnecting:
+
+```json
+{
+  "database": "mydb",
+  "collection": "users",
+  "resumeToken": {
+    "opId": 12345
+  }
+}
+```
+
+Extract the resume token from each event's `_id` field:
+
+```javascript
+ws.onmessage = (event) => {
+  const response = JSON.parse(event.data);
+
+  if (response.type === 'event') {
+    const resumeToken = response.event._id;
+    // Save for reconnection
+    localStorage.setItem('resumeToken', JSON.stringify(resumeToken));
+  }
+};
+```
+
+### Use Cases
+
+1. **Real-time Dashboards**: Update UI immediately when data changes
+2. **Cache Invalidation**: Clear cache entries when documents are modified
+3. **Data Synchronization**: Keep multiple systems in sync
+4. **Notifications**: Send alerts when specific events occur
+5. **Audit Logging**: Track all database operations in real-time
+
+### Complete Documentation
+
+For detailed WebSocket API documentation, including:
+- Advanced filtering and pipeline transformations
+- Error handling and reconnection strategies
+- Performance tuning and best practices
+- Complete code examples in multiple languages
+
+See: [WebSocket API Documentation](./websocket-api.md)
+
+### Example Program
+
+A complete working example is available at [examples/websocket-demo](../examples/websocket-demo/)

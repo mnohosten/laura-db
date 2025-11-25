@@ -1,0 +1,110 @@
+# Docker Compose configuration for LauraDB
+# Usage:
+#   Development: docker-compose up -d
+#   Production:  docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#   With monitoring: docker-compose --profile monitoring up -d
+#
+# Disk Storage:
+#   LauraDB uses persistent disk storage at /data
+#   Data survives container restarts via the laura-data volume
+#   Configure buffer pool and cache sizes with environment variables
+
+services:
+  # LauraDB server
+  laura-db:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: laura-db:latest
+    container_name: laura-db
+    restart: unless-stopped
+    ports:
+      - "${LAURA_PORT:-8080}:8080"
+    # Storage and performance configuration
+    environment:
+      - DATA_DIR=/data                                    # Persistent data directory
+      - BUFFER_SIZE=${LAURA_BUFFER_SIZE:-1000}           # Buffer pool size in pages (1 page = 4KB)
+      - DOC_CACHE=${LAURA_DOC_CACHE:-1000}               # Document cache size per collection
+      - CORS_ORIGIN=${LAURA_CORS_ORIGIN:-*}
+    # Persistent volume for disk storage
+    # All database files (data.db, wal.log, collections/) stored here
+    volumes:
+      - laura-data:/data
+    networks:
+      - laura-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/_health"]
+      interval: 30s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+    labels:
+      - "com.laura-db.description=LauraDB document database server"
+      - "com.laura-db.version=0.5.0"
+
+  # Prometheus (optional, for monitoring)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: laura-prometheus
+    restart: unless-stopped
+    profiles:
+      - monitoring
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    networks:
+      - laura-network
+    depends_on:
+      - laura-db
+    labels:
+      - "com.laura-db.description=Prometheus metrics collection"
+
+  # Grafana (optional, for visualization)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: laura-grafana
+    restart: unless-stopped
+    profiles:
+      - monitoring
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana-dashboard.json:/etc/grafana/provisioning/dashboards/laura-db.json:ro
+    networks:
+      - laura-network
+    depends_on:
+      - prometheus
+    labels:
+      - "com.laura-db.description=Grafana visualization dashboard"
+
+volumes:
+  laura-data:
+    driver: local
+    labels:
+      - "com.laura-db.description=LauraDB persistent data storage"
+  prometheus-data:
+    driver: local
+    labels:
+      - "com.laura-db.description=Prometheus metrics storage"
+  grafana-data:
+    driver: local
+    labels:
+      - "com.laura-db.description=Grafana dashboard storage"
+
+networks:
+  laura-network:
+    driver: bridge
+    labels:
+      - "com.laura-db.description=LauraDB internal network"

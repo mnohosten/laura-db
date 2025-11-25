@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"github.com/mnohosten/laura-db/pkg/backup"
-	"github.com/mnohosten/laura-db/pkg/document"
 	"github.com/mnohosten/laura-db/pkg/index"
 )
 
@@ -35,10 +34,10 @@ func (db *Database) backupCollection(backupFormat *backup.BackupFormat, name str
 	coll.mu.RLock()
 	defer coll.mu.RUnlock()
 
-	// Get all documents
-	docs := make([]*document.Document, 0, len(coll.documents))
-	for _, doc := range coll.documents {
-		docs = append(docs, doc)
+	// Get all documents from document store
+	docs, err := coll.getAllDocuments()
+	if err != nil {
+		return fmt.Errorf("failed to get documents: %w", err)
 	}
 
 	// Get all indexes
@@ -127,7 +126,9 @@ func (db *Database) restoreCollection(collBackup backup.CollectionBackup, option
 	if existing, exists := db.collections[collBackup.Name]; exists {
 		coll = existing
 	} else {
-		coll = NewCollection(collBackup.Name, db.txnMgr)
+		// Create document store for this collection
+		docStore := NewDocumentStore(db.storage.DiskManager(), 1000) // 1000 documents cache
+		coll = NewCollection(collBackup.Name, db.txnMgr, docStore)
 		db.collections[collBackup.Name] = coll
 	}
 

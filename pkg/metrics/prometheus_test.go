@@ -449,3 +449,91 @@ func TestPrometheusExporter_LargeMetricValues(t *testing.T) {
 		t.Error("Expected queries_total to be 1000")
 	}
 }
+
+// failingWriter is a writer that fails after a certain number of writes
+type failingWriter struct {
+	writeCount    int
+	failAfterN    int
+	bytesWritten  int
+}
+
+func (fw *failingWriter) Write(p []byte) (n int, err error) {
+	fw.writeCount++
+	if fw.writeCount > fw.failAfterN {
+		return 0, &testError{"simulated write error"}
+	}
+	fw.bytesWritten += len(p)
+	return len(p), nil
+}
+
+type testError struct {
+	msg string
+}
+
+func (e *testError) Error() string {
+	return e.msg
+}
+
+func TestPrometheusExporter_WriteErrorHandling(t *testing.T) {
+	collector := NewMetricsCollector()
+	exporter := NewPrometheusExporter(collector, nil)
+
+	// Record operations to generate various metrics
+	collector.RecordQuery(10*time.Millisecond, true)
+	collector.RecordInsert(5*time.Millisecond, true)
+	collector.RecordUpdate(15*time.Millisecond, true)
+	collector.RecordDelete(8*time.Millisecond, true)
+	collector.RecordCacheHit()
+	collector.RecordIndexScan()
+
+	// Test with failing writer at different stages
+	testCases := []int{1, 5, 10, 20, 50, 100}
+	for _, failAfter := range testCases {
+		fw := &failingWriter{failAfterN: failAfter}
+		err := exporter.WriteMetrics(fw)
+		if err == nil {
+			// It's okay if we wrote enough to succeed
+			continue
+		}
+		// Check that error is propagated
+		if err.Error() != "simulated write error" {
+			t.Errorf("Expected error 'simulated write error', got: %v", err)
+		}
+	}
+}
+
+func TestPrometheusExporter_HistogramErrorHandling(t *testing.T) {
+	collector := NewMetricsCollector()
+	exporter := NewPrometheusExporter(collector, nil)
+
+	// Record operations with different timings to populate all histogram buckets
+	collector.RecordQuery(500*time.Microsecond, true) // 0-1ms
+	collector.RecordQuery(5*time.Millisecond, true)   // 1-10ms
+	collector.RecordQuery(50*time.Millisecond, true)  // 10-100ms
+	collector.RecordQuery(500*time.Millisecond, true) // 100-1000ms
+	collector.RecordQuery(2*time.Second, true)        // >1000ms
+
+	// Test histogram error handling - fail during histogram writes
+	fw := &failingWriter{failAfterN: 15} // Fail in middle of histogram writing
+	err := exporter.WriteMetrics(fw)
+	if err == nil {
+		t.Error("Expected error when writing histograms with failing writer")
+	}
+}
+
+func TestPrometheusExporter_PercentileErrorHandling(t *testing.T) {
+	collector := NewMetricsCollector()
+	exporter := NewPrometheusExporter(collector, nil)
+
+	// Record enough operations to have meaningful percentiles
+	for i := 0; i < 100; i++ {
+		collector.RecordQuery(time.Duration(i)*time.Millisecond, true)
+	}
+
+	// Test percentile error handling - fail during percentile writes
+	fw := &failingWriter{failAfterN: 30} // Fail in middle of percentile writing
+	err := exporter.WriteMetrics(fw)
+	if err == nil {
+		t.Error("Expected error when writing percentiles with failing writer")
+	}
+}

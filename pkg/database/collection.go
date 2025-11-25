@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/mnohosten/laura-db/pkg/aggregation"
+	"github.com/mnohosten/laura-db/pkg/audit"
 	"github.com/mnohosten/laura-db/pkg/cache"
 	"github.com/mnohosten/laura-db/pkg/document"
 	"github.com/mnohosten/laura-db/pkg/geo"
@@ -18,21 +19,23 @@ import (
 // Collection represents a collection of documents
 type Collection struct {
 	name        string
-	documents   map[string]*document.Document // _id -> document
-	indexes     map[string]*index.Index       // index name -> index
-	textIndexes map[string]*index.TextIndex   // text index name -> text index
-	geoIndexes  map[string]*index.GeoIndex    // geo index name -> geo index
-	ttlIndexes  map[string]*index.TTLIndex    // ttl index name -> ttl index
+	database    string                      // Database name for audit logging
+	docStore    *DocumentStore              // Disk-based document storage
+	indexes     map[string]*index.Index     // index name -> index
+	textIndexes map[string]*index.TextIndex // text index name -> text index
+	geoIndexes  map[string]*index.GeoIndex  // geo index name -> geo index
+	ttlIndexes  map[string]*index.TTLIndex  // ttl index name -> ttl index
 	txnMgr      *mvcc.TransactionManager
-	queryCache  *cache.LRUCache // Query result cache
+	auditLogger *audit.AuditLogger // Audit logger
+	queryCache  *cache.LRUCache    // Query result cache
 	mu          sync.RWMutex
 }
 
 // NewCollection creates a new collection
-func NewCollection(name string, txnMgr *mvcc.TransactionManager) *Collection {
+func NewCollection(name string, txnMgr *mvcc.TransactionManager, docStore *DocumentStore) *Collection {
 	coll := &Collection{
 		name:        name,
-		documents:   make(map[string]*document.Document),
+		docStore:    docStore,
 		indexes:     make(map[string]*index.Index),
 		textIndexes: make(map[string]*index.TextIndex),
 		geoIndexes:  make(map[string]*index.GeoIndex),
@@ -56,6 +59,7 @@ func NewCollection(name string, txnMgr *mvcc.TransactionManager) *Collection {
 
 // InsertOne inserts a single document
 func (c *Collection) InsertOne(doc map[string]interface{}) (string, error) {
+	start := time.Now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -73,8 +77,12 @@ func (c *Collection) InsertOne(doc map[string]interface{}) (string, error) {
 	}
 
 	// Check if document already exists
-	if _, exists := c.documents[id]; exists {
-		return "", fmt.Errorf("document with _id %s already exists", id)
+	if c.docStore.Exists(id) {
+		err := fmt.Errorf("document with _id %s already exists", id)
+		if c.auditLogger != nil {
+			c.auditLogger.LogInsert(c.name, c.database, "", false, 0, time.Since(start), err)
+		}
+		return "", err
 	}
 
 	// Insert into indexes
@@ -155,11 +163,43 @@ func (c *Collection) InsertOne(doc map[string]interface{}) (string, error) {
 		}
 	}
 
-	// Store document
-	c.documents[id] = d
+	// Store document to disk
+	if err := c.docStore.Insert(id, d); err != nil {
+		// Rollback index entries on failure
+		for _, idx := range c.indexes {
+			if idx.IsCompound() {
+				if compositeKey, allFieldsExist := c.extractCompositeKey(d, idx.FieldPaths()); allFieldsExist {
+					idx.Delete(compositeKey)
+				}
+			} else {
+				if fieldValue, exists := d.Get(idx.FieldPath()); exists {
+					idx.Delete(fieldValue)
+				}
+			}
+		}
+		for _, textIdx := range c.textIndexes {
+			textIdx.Remove(id)
+		}
+		for _, geoIdx := range c.geoIndexes {
+			geoIdx.Remove(id)
+		}
+		for _, ttlIdx := range c.ttlIndexes {
+			ttlIdx.Remove(id)
+		}
+
+		if c.auditLogger != nil {
+			c.auditLogger.LogInsert(c.name, c.database, "", false, 0, time.Since(start), err)
+		}
+		return "", fmt.Errorf("failed to store document: %w", err)
+	}
 
 	// Invalidate query cache on write
 	c.queryCache.Clear()
+
+	// Log successful insert
+	if c.auditLogger != nil {
+		c.auditLogger.LogInsert(c.name, c.database, "", true, 1, time.Since(start), nil)
+	}
 
 	return id, nil
 }
@@ -204,6 +244,7 @@ func (c *Collection) Find(filter map[string]interface{}) ([]*document.Document, 
 
 // FindWithOptions finds documents with query options
 func (c *Collection) FindWithOptions(filter map[string]interface{}, options *QueryOptions) ([]*document.Document, error) {
+	start := time.Now()
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -261,17 +302,65 @@ func (c *Collection) FindWithOptions(filter map[string]interface{}, options *Que
 
 	results, err := c.executeQuery(q)
 	if err != nil {
+		if c.auditLogger != nil {
+			c.auditLogger.LogFind(c.name, c.database, "", false, 0, time.Since(start), filter, err)
+		}
 		return nil, err
 	}
 
 	// Store in cache
 	c.queryCache.Put(cacheKey, results)
 
+	// Log successful find
+	if c.auditLogger != nil {
+		c.auditLogger.LogFind(c.name, c.database, "", true, len(results), time.Since(start), filter, nil)
+	}
+
 	return results, nil
+}
+
+// FindCursor creates a cursor for iterating over query results
+func (c *Collection) FindCursor(filter map[string]interface{}, options *CursorOptions) (*Cursor, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	q := query.NewQuery(filter)
+	return NewCursor(c, q, options)
+}
+
+// FindCursorWithOptions creates a cursor with query options
+func (c *Collection) FindCursorWithOptions(filter map[string]interface{}, queryOptions *QueryOptions, cursorOptions *CursorOptions) (*Cursor, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	q := query.NewQuery(filter)
+
+	if queryOptions != nil {
+		if queryOptions.Projection != nil {
+			q.WithProjection(queryOptions.Projection)
+		}
+		if queryOptions.Sort != nil {
+			q.WithSort(queryOptions.Sort)
+		}
+		if queryOptions.Limit > 0 {
+			q.WithLimit(queryOptions.Limit)
+		}
+		if queryOptions.Skip > 0 {
+			q.WithSkip(queryOptions.Skip)
+		}
+	}
+
+	return NewCursor(c, q, cursorOptions)
 }
 
 // executeQuery executes a query with query planning and index optimization
 func (c *Collection) executeQuery(q *query.Query) ([]*document.Document, error) {
+	// Load all documents from disk storage
+	docs, err := c.getAllDocuments()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load documents: %w", err)
+	}
+
 	// Create query planner
 	planner := query.NewQueryPlanner(c.indexes)
 
@@ -281,21 +370,41 @@ func (c *Collection) executeQuery(q *query.Query) ([]*document.Document, error) 
 	// Detect if query can be covered by index
 	planner.DetectCoveredQuery(plan, q.GetProjection())
 
-	// Create executor with document map for efficient lookups
-	executor := query.NewExecutorWithMap(c.documents)
+	// Create executor with documents
+	executor := query.NewExecutor(docs)
 
 	// Execute with plan (will use index if beneficial)
 	return executor.ExecuteWithPlan(q, plan)
 }
 
+// getAllDocuments loads all documents from storage
+func (c *Collection) getAllDocuments() ([]*document.Document, error) {
+	ids := c.docStore.GetAllIDs()
+	docs := make([]*document.Document, 0, len(ids))
+
+	for _, id := range ids {
+		doc, err := c.docStore.Get(id)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get document %s: %w", id, err)
+		}
+		docs = append(docs, doc)
+	}
+
+	return docs, nil
+}
+
 // UpdateOne updates a single document matching the filter
 func (c *Collection) UpdateOne(filter map[string]interface{}, update map[string]interface{}) error {
+	start := time.Now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	// Find document
 	doc, err := c.findOneInternal(filter)
 	if err != nil {
+		if c.auditLogger != nil {
+			c.auditLogger.LogUpdate(c.name, c.database, "", false, 0, time.Since(start), filter, update, err)
+		}
 		return err
 	}
 
@@ -336,6 +445,14 @@ func (c *Collection) UpdateOne(filter map[string]interface{}, update map[string]
 	// Apply update
 	if err := c.applyUpdate(doc, update); err != nil {
 		return err
+	}
+
+	// Write updated document to disk
+	if err := c.docStore.Update(id, doc); err != nil {
+		if c.auditLogger != nil {
+			c.auditLogger.LogUpdate(c.name, c.database, "", false, 0, time.Since(start), filter, update, err)
+		}
+		return fmt.Errorf("failed to update document on disk: %w", err)
 	}
 
 	// Add new index entries after update
@@ -413,6 +530,11 @@ func (c *Collection) UpdateOne(filter map[string]interface{}, update map[string]
 	// Invalidate query cache on write
 	c.queryCache.Clear()
 
+	// Log successful update
+	if c.auditLogger != nil {
+		c.auditLogger.LogUpdate(c.name, c.database, "", true, 1, time.Since(start), filter, update, nil)
+	}
+
 	return nil
 }
 
@@ -467,6 +589,11 @@ func (c *Collection) UpdateMany(filter map[string]interface{}, update map[string
 		// Apply update
 		if err := c.applyUpdate(doc, update); err != nil {
 			return count, err
+		}
+
+		// Write updated document to disk
+		if err := c.docStore.Update(id, doc); err != nil {
+			return count, fmt.Errorf("failed to update document %s on disk: %w", id, err)
 		}
 
 		// Add new index entries after update
@@ -902,11 +1029,15 @@ func (c *Collection) applyUpdate(doc *document.Document, update map[string]inter
 
 // DeleteOne deletes a single document matching the filter
 func (c *Collection) DeleteOne(filter map[string]interface{}) error {
+	start := time.Now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	doc, err := c.findOneInternal(filter)
 	if err != nil {
+		if c.auditLogger != nil {
+			c.auditLogger.LogDelete(c.name, c.database, "", false, 0, time.Since(start), filter, err)
+		}
 		return err
 	}
 
@@ -943,11 +1074,21 @@ func (c *Collection) DeleteOne(filter map[string]interface{}) error {
 		ttlIdx.Remove(id)
 	}
 
-	// Delete document
-	delete(c.documents, id)
+	// Delete document from disk
+	if err := c.docStore.Delete(id); err != nil {
+		if c.auditLogger != nil {
+			c.auditLogger.LogDelete(c.name, c.database, "", false, 0, time.Since(start), filter, err)
+		}
+		return fmt.Errorf("failed to delete document from disk: %w", err)
+	}
 
 	// Invalidate query cache on write
 	c.queryCache.Clear()
+
+	// Log successful delete
+	if c.auditLogger != nil {
+		c.auditLogger.LogDelete(c.name, c.database, "", true, 1, time.Since(start), filter, nil)
+	}
 
 	return nil
 }
@@ -997,7 +1138,11 @@ func (c *Collection) DeleteMany(filter map[string]interface{}) (int, error) {
 			ttlIdx.Remove(id)
 		}
 
-		delete(c.documents, id)
+		// Delete document from disk
+		if err := c.docStore.Delete(id); err != nil {
+			return count, fmt.Errorf("failed to delete document %s from disk: %w", id, err)
+		}
+
 		count++
 	}
 
@@ -1054,12 +1199,17 @@ func (c *Collection) CreateIndex(fieldPath string, unique bool) error {
 
 // CreateIndexWithBackground creates an index on a field with optional background building
 func (c *Collection) CreateIndexWithBackground(fieldPath string, unique bool, background bool) error {
+	start := time.Now()
 	c.mu.Lock()
 
 	indexName := fieldPath + "_1"
 	if _, exists := c.indexes[indexName]; exists {
 		c.mu.Unlock()
-		return fmt.Errorf("index %s already exists", indexName)
+		err := fmt.Errorf("index %s already exists", indexName)
+		if c.auditLogger != nil {
+			c.auditLogger.LogIndexOperation(audit.OperationCreateIndex, c.name, c.database, "", indexName, false, time.Since(start), err)
+		}
+		return err
 	}
 
 	idx := index.NewIndex(&index.IndexConfig{
@@ -1082,7 +1232,13 @@ func (c *Collection) CreateIndexWithBackground(fieldPath string, unique bool, ba
 		c.buildSingleFieldIndexInBackgroundWithSnapshot(idx, snapshots)
 	} else {
 		// Build index synchronously from existing documents
-		for id, doc := range c.documents {
+		ids := c.docStore.GetAllIDs()
+		for _, id := range ids {
+			doc, err := c.docStore.Get(id)
+			if err != nil {
+				c.mu.Unlock()
+				return fmt.Errorf("failed to get document %s: %w", id, err)
+			}
 			if fieldValue, exists := doc.Get(fieldPath); exists {
 				if err := idx.Insert(fieldValue, id); err != nil {
 					c.mu.Unlock()
@@ -1091,6 +1247,11 @@ func (c *Collection) CreateIndexWithBackground(fieldPath string, unique bool, ba
 			}
 		}
 		c.mu.Unlock()
+	}
+
+	// Log successful index creation
+	if c.auditLogger != nil {
+		c.auditLogger.LogIndexOperation(audit.OperationCreateIndex, c.name, c.database, "", indexName, true, time.Since(start), nil)
 	}
 
 	return nil
@@ -1145,7 +1306,14 @@ func (c *Collection) CreateCompoundIndexWithBackground(fieldPaths []string, uniq
 		c.buildCompoundIndexInBackgroundWithSnapshot(idx, snapshots)
 	} else {
 		// Build index synchronously from existing documents
-		for id, doc := range c.documents {
+		ids := c.docStore.GetAllIDs()
+		for _, id := range ids {
+			doc, err := c.docStore.Get(id)
+			if err != nil {
+				c.mu.Unlock()
+				return fmt.Errorf("failed to get document %s: %w", id, err)
+			}
+
 			// Extract all field values for the composite key
 			values := make([]interface{}, 0, len(fieldPaths))
 			allFieldsExist := true
@@ -1200,7 +1368,13 @@ func (c *Collection) CreatePartialIndex(fieldPath string, filter map[string]inte
 	})
 
 	// Build index from existing documents that match the filter
-	for id, doc := range c.documents {
+	ids := c.docStore.GetAllIDs()
+	for _, id := range ids {
+		doc, err := c.docStore.Get(id)
+		if err != nil {
+			return fmt.Errorf("failed to get document %s: %w", id, err)
+		}
+
 		// Check if document matches the filter
 		if c.matchesPartialIndexFilter(doc, idx) {
 			// Get field value and insert into index
@@ -1243,7 +1417,13 @@ func (c *Collection) CreateTextIndex(fieldPaths []string) error {
 	textIdx := index.NewTextIndex(indexName, fieldPaths)
 
 	// Build index from existing documents
-	for id, doc := range c.documents {
+	ids := c.docStore.GetAllIDs()
+	for _, id := range ids {
+		doc, err := c.docStore.Get(id)
+		if err != nil {
+			return fmt.Errorf("failed to get document %s: %w", id, err)
+		}
+
 		// Extract all text field values
 		texts := make([]string, 0, len(fieldPaths))
 
@@ -1281,7 +1461,13 @@ func (c *Collection) Create2DIndex(fieldPath string) error {
 	geoIdx := index.NewGeoIndex(indexName, fieldPath, index.IndexType2D)
 
 	// Build index from existing documents
-	for id, doc := range c.documents {
+	ids := c.docStore.GetAllIDs()
+	for _, id := range ids {
+		doc, err := c.docStore.Get(id)
+		if err != nil {
+			return fmt.Errorf("failed to get document %s: %w", id, err)
+		}
+
 		if fieldValue, exists := doc.Get(fieldPath); exists {
 			// Try to parse as GeoJSON point
 			if pointMap, ok := fieldValue.(map[string]interface{}); ok {
@@ -1311,7 +1497,13 @@ func (c *Collection) Create2DSphereIndex(fieldPath string) error {
 	geoIdx := index.NewGeoIndex(indexName, fieldPath, index.IndexType2DSphere)
 
 	// Build index from existing documents
-	for id, doc := range c.documents {
+	ids := c.docStore.GetAllIDs()
+	for _, id := range ids {
+		doc, err := c.docStore.Get(id)
+		if err != nil {
+			return fmt.Errorf("failed to get document %s: %w", id, err)
+		}
+
 		if fieldValue, exists := doc.Get(fieldPath); exists {
 			// Try to parse as GeoJSON point
 			if pointMap, ok := fieldValue.(map[string]interface{}); ok {
@@ -1342,7 +1534,13 @@ func (c *Collection) CreateTTLIndex(fieldPath string, ttlSeconds int64) error {
 	ttlIdx := index.NewTTLIndex(indexName, fieldPath, ttlSeconds)
 
 	// Build index from existing documents
-	for id, doc := range c.documents {
+	ids := c.docStore.GetAllIDs()
+	for _, id := range ids {
+		doc, err := c.docStore.Get(id)
+		if err != nil {
+			return fmt.Errorf("failed to get document %s: %w", id, err)
+		}
+
 		if fieldValue, exists := doc.Get(fieldPath); exists {
 			// Try to convert to time.Time
 			var timestamp time.Time
@@ -1371,38 +1569,59 @@ func (c *Collection) CreateTTLIndex(fieldPath string, ttlSeconds int64) error {
 
 // DropIndex drops an index (B+ tree, compound, text, geo, or ttl)
 func (c *Collection) DropIndex(indexName string) error {
+	start := time.Now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if indexName == "_id_" {
-		return fmt.Errorf("cannot drop _id index")
+		err := fmt.Errorf("cannot drop _id index")
+		if c.auditLogger != nil {
+			c.auditLogger.LogIndexOperation(audit.OperationDropIndex, c.name, c.database, "", indexName, false, time.Since(start), err)
+		}
+		return err
 	}
 
 	// Check if it's a regular index
 	if _, exists := c.indexes[indexName]; exists {
 		delete(c.indexes, indexName)
+		if c.auditLogger != nil {
+			c.auditLogger.LogIndexOperation(audit.OperationDropIndex, c.name, c.database, "", indexName, true, time.Since(start), nil)
+		}
 		return nil
 	}
 
 	// Check if it's a text index
 	if _, exists := c.textIndexes[indexName]; exists {
 		delete(c.textIndexes, indexName)
+		if c.auditLogger != nil {
+			c.auditLogger.LogIndexOperation(audit.OperationDropIndex, c.name, c.database, "", indexName, true, time.Since(start), nil)
+		}
 		return nil
 	}
 
 	// Check if it's a geo index
 	if _, exists := c.geoIndexes[indexName]; exists {
 		delete(c.geoIndexes, indexName)
+		if c.auditLogger != nil {
+			c.auditLogger.LogIndexOperation(audit.OperationDropIndex, c.name, c.database, "", indexName, true, time.Since(start), nil)
+		}
 		return nil
 	}
 
 	// Check if it's a TTL index
 	if _, exists := c.ttlIndexes[indexName]; exists {
 		delete(c.ttlIndexes, indexName)
+		if c.auditLogger != nil {
+			c.auditLogger.LogIndexOperation(audit.OperationDropIndex, c.name, c.database, "", indexName, true, time.Since(start), nil)
+		}
 		return nil
 	}
 
-	return fmt.Errorf("index %s does not exist", indexName)
+	err := fmt.Errorf("index %s does not exist", indexName)
+	if c.auditLogger != nil {
+		c.auditLogger.LogIndexOperation(audit.OperationDropIndex, c.name, c.database, "", indexName, false, time.Since(start), err)
+	}
+	return err
 }
 
 // ListIndexes returns all indexes (B+ tree, compound, text, geo, and ttl)
@@ -1446,10 +1665,10 @@ func (c *Collection) Aggregate(pipeline []map[string]interface{}) ([]*document.D
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	// Get all documents
-	docs := make([]*document.Document, 0, len(c.documents))
-	for _, doc := range c.documents {
-		docs = append(docs, doc)
+	// Get all documents from disk storage
+	docs, err := c.getAllDocuments()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load documents: %w", err)
 	}
 
 	// Create and execute pipeline
@@ -1473,7 +1692,7 @@ func (c *Collection) Stats() map[string]interface{} {
 
 	return map[string]interface{}{
 		"name":             c.name,
-		"count":            len(c.documents),
+		"count":            c.docStore.Count(),
 		"indexes":          len(c.indexes),
 		"index_count":      len(c.indexes),
 		"text_index_count": len(c.textIndexes),
@@ -1520,12 +1739,15 @@ func (c *Collection) TextSearch(searchText string, options *QueryOptions) ([]*do
 	// Convert results to documents
 	docs := make([]*document.Document, 0, len(results))
 	for _, result := range results {
-		if doc, exists := c.documents[result.DocID]; exists {
-			// Add relevance score as a metadata field
-			docCopy := document.NewDocumentFromMap(doc.ToMap())
-			docCopy.Set("_textScore", result.Score)
-			docs = append(docs, docCopy)
+		doc, err := c.docStore.Get(result.DocID)
+		if err != nil {
+			// Document might have been deleted, skip it
+			continue
 		}
+		// Add relevance score as a metadata field
+		docCopy := document.NewDocumentFromMap(doc.ToMap())
+		docCopy.Set("_textScore", result.Score)
+		docs = append(docs, docCopy)
 	}
 
 	// Apply projection if specified
@@ -1596,7 +1818,7 @@ func (c *Collection) Explain(filter map[string]interface{}) map[string]interface
 
 	// Add collection info
 	explanation["collection"] = c.name
-	explanation["totalDocuments"] = len(c.documents)
+	explanation["totalDocuments"] = c.docStore.Count()
 	explanation["availableIndexes"] = make([]string, 0, len(c.indexes))
 	for indexName := range c.indexes {
 		explanation["availableIndexes"] = append(explanation["availableIndexes"].([]string), indexName)
@@ -1621,9 +1843,10 @@ func (c *Collection) findOneInternal(filter map[string]interface{}) (*document.D
 func (c *Collection) findInternal(filter map[string]interface{}) ([]*document.Document, error) {
 	q := query.NewQuery(filter)
 
-	docs := make([]*document.Document, 0, len(c.documents))
-	for _, doc := range c.documents {
-		docs = append(docs, doc)
+	// Load all documents from disk storage
+	docs, err := c.getAllDocuments()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load documents: %w", err)
 	}
 
 	executor := query.NewExecutor(docs)
@@ -1710,12 +1933,15 @@ func (c *Collection) Near(fieldPath string, center *geo.Point, maxDistance float
 	// Convert results to documents
 	docs := make([]*document.Document, 0, len(results))
 	for _, result := range results {
-		if doc, exists := c.documents[result.DocID]; exists {
-			// Add distance as metadata field
-			docCopy := document.NewDocumentFromMap(doc.ToMap())
-			docCopy.Set("_distance", result.Distance)
-			docs = append(docs, docCopy)
+		doc, err := c.docStore.Get(result.DocID)
+		if err != nil {
+			// Document might have been deleted, skip it
+			continue
 		}
+		// Add distance as metadata field
+		docCopy := document.NewDocumentFromMap(doc.ToMap())
+		docCopy.Set("_distance", result.Distance)
+		docs = append(docs, docCopy)
 	}
 
 	// Apply projection if specified
@@ -1783,9 +2009,12 @@ func (c *Collection) GeoWithin(fieldPath string, polygon *geo.Polygon, options *
 	// Convert IDs to documents
 	docs := make([]*document.Document, 0, len(docIDs))
 	for _, id := range docIDs {
-		if doc, exists := c.documents[id]; exists {
-			docs = append(docs, doc)
+		doc, err := c.docStore.Get(id)
+		if err != nil {
+			// Document might have been deleted, skip it
+			continue
 		}
+		docs = append(docs, doc)
 	}
 
 	// Apply projection if specified
@@ -1861,9 +2090,12 @@ func (c *Collection) GeoIntersects(fieldPath string, box *geo.BoundingBox, optio
 	// Convert IDs to documents
 	docs := make([]*document.Document, 0, len(docIDs))
 	for _, id := range docIDs {
-		if doc, exists := c.documents[id]; exists {
-			docs = append(docs, doc)
+		doc, err := c.docStore.Get(id)
+		if err != nil {
+			// Document might have been deleted, skip it
+			continue
 		}
+		docs = append(docs, doc)
 	}
 
 	// Apply projection if specified
@@ -1939,8 +2171,9 @@ func (c *Collection) CleanupExpiredDocuments() int {
 
 	// Delete each expired document
 	for docID := range toDelete {
-		doc, exists := c.documents[docID]
-		if !exists {
+		doc, err := c.docStore.Get(docID)
+		if err != nil {
+			// Document doesn't exist, skip
 			continue
 		}
 
@@ -1972,8 +2205,11 @@ func (c *Collection) CleanupExpiredDocuments() int {
 			ttlIdx.Remove(docID)
 		}
 
-		// Delete the document
-		delete(c.documents, docID)
+		// Delete the document from disk
+		if err := c.docStore.Delete(docID); err != nil {
+			// Log error but continue with other documents
+			continue
+		}
 		deletedCount++
 	}
 
@@ -1997,8 +2233,16 @@ type docSnapshot struct {
 // captureSingleFieldSnapshot captures a snapshot of documents for single-field index building
 // Must be called while holding c.mu lock
 func (c *Collection) captureSingleFieldSnapshot(idx *index.Index, fieldPath string) []docSnapshot {
-	snapshots := make([]docSnapshot, 0, len(c.documents))
-	for id, doc := range c.documents {
+	ids := c.docStore.GetAllIDs()
+	snapshots := make([]docSnapshot, 0, len(ids))
+
+	for _, id := range ids {
+		doc, err := c.docStore.Get(id)
+		if err != nil {
+			// Document might have been deleted, skip it
+			continue
+		}
+
 		snapshot := docSnapshot{id: id}
 
 		// Check if document matches partial index filter (if applicable)
@@ -2070,8 +2314,16 @@ func (c *Collection) buildSingleFieldIndexInBackgroundWithSnapshot(idx *index.In
 // captureCompoundIndexSnapshot captures a snapshot of documents for compound index building
 // Must be called while holding c.mu lock
 func (c *Collection) captureCompoundIndexSnapshot(idx *index.Index, fieldPaths []string) []docSnapshot {
-	snapshots := make([]docSnapshot, 0, len(c.documents))
-	for id, doc := range c.documents {
+	ids := c.docStore.GetAllIDs()
+	snapshots := make([]docSnapshot, 0, len(ids))
+
+	for _, id := range ids {
+		doc, err := c.docStore.Get(id)
+		if err != nil {
+			// Document might have been deleted, skip it
+			continue
+		}
+
 		snapshot := docSnapshot{id: id}
 
 		// Check if document matches partial index filter (if applicable)
@@ -2162,4 +2414,88 @@ func (c *Collection) GetIndexBuildProgress(indexName string) (map[string]interfa
 	}
 
 	return idx.GetBuildProgress(), nil
+}
+
+// BulkOperation represents a single operation in a bulk write
+type BulkOperation struct {
+	Type     string                 // "insert", "update", "delete"
+	Document map[string]interface{} // For insert operations
+	Filter   map[string]interface{} // For update and delete operations
+	Update   map[string]interface{} // For update operations
+}
+
+// BulkWriteResult contains the results of a bulk write operation
+type BulkWriteResult struct {
+	InsertedCount int      `json:"insertedCount"`
+	ModifiedCount int      `json:"modifiedCount"`
+	DeletedCount  int      `json:"deletedCount"`
+	InsertedIds   []string `json:"insertedIds"`
+	Errors        []string `json:"errors"`
+}
+
+// BulkWrite performs multiple insert, update, and delete operations
+// If ordered is true, stops on first error. If false, continues with remaining operations.
+func (c *Collection) BulkWrite(operations []BulkOperation, ordered bool) (*BulkWriteResult, error) {
+	result := &BulkWriteResult{
+		InsertedIds: make([]string, 0),
+		Errors:      make([]string, 0),
+	}
+
+	for i, op := range operations {
+		var err error
+
+		switch op.Type {
+		case "insert":
+			if op.Document == nil {
+				err = fmt.Errorf("operation %d: insert requires document", i)
+			} else {
+				var id string
+				id, err = c.InsertOne(op.Document)
+				if err == nil {
+					result.InsertedCount++
+					result.InsertedIds = append(result.InsertedIds, id)
+				}
+			}
+
+		case "update":
+			if op.Filter == nil || op.Update == nil {
+				err = fmt.Errorf("operation %d: update requires filter and update", i)
+			} else {
+				var count int
+				count, err = c.UpdateMany(op.Filter, op.Update)
+				if err == nil {
+					result.ModifiedCount += count
+				}
+			}
+
+		case "delete":
+			if op.Filter == nil {
+				err = fmt.Errorf("operation %d: delete requires filter", i)
+			} else {
+				var count int
+				count, err = c.DeleteMany(op.Filter)
+				if err == nil {
+					result.DeletedCount += count
+				}
+			}
+
+		default:
+			err = fmt.Errorf("operation %d: unknown operation type: %s", i, op.Type)
+		}
+
+		if err != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("operation %d: %v", i, err))
+			if ordered {
+				// Stop processing on first error in ordered mode
+				return result, fmt.Errorf("bulk write failed at operation %d: %w", i, err)
+			}
+		}
+	}
+
+	// If we have errors in unordered mode, return them but don't fail the entire operation
+	if len(result.Errors) > 0 && !ordered {
+		return result, fmt.Errorf("bulk write completed with %d errors", len(result.Errors))
+	}
+
+	return result, nil
 }

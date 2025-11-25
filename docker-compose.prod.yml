@@ -1,0 +1,83 @@
+# Production overrides for Docker Compose
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Production Configuration:
+#   - Increased buffer pool size (5000 pages = ~20MB) for better performance
+#   - Increased document cache (5000 docs) for high-read workloads
+#   - Resource limits to prevent runaway processes
+#   - Structured logging with rotation
+
+services:
+  laura-db:
+    restart: always
+    # Production storage configuration (tuned for performance)
+    environment:
+      - BUFFER_SIZE=5000          # 20MB buffer pool for larger datasets
+      - DOC_CACHE=5000            # Larger cache for production workloads
+      - CORS_ORIGIN=https://yourdomain.com
+    # Production resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '1'
+          memory: 1G
+    # Production logging
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # TLS support (uncomment and configure as needed)
+    # command:
+    #   - "-host"
+    #   - "0.0.0.0"
+    #   - "-port"
+    #   - "8080"
+    #   - "-data-dir"
+    #   - "/data"
+    #   - "-tls"
+    #   - "-tls-cert"
+    #   - "/certs/server.crt"
+    #   - "-tls-key"
+    #   - "/certs/server.key"
+    # volumes:
+    #   - ./certs:/certs:ro
+
+  prometheus:
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  grafana:
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    environment:
+      - GF_SERVER_ROOT_URL=https://grafana.yourdomain.com
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
