@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LauraDB Admin Console</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-content">
+                <h1>LauraDB Admin Console</h1>
+                <div class="server-info">
+                    <span id="server-status" class="status-badge">Connected</span>
+                    <span id="server-uptime"></span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Navigation -->
+        <nav class="nav-tabs">
+            <button class="nav-tab active" data-tab="console">Console</button>
+            <button class="nav-tab" data-tab="collections">Collections</button>
+            <button class="nav-tab" data-tab="documents">Documents</button>
+            <button class="nav-tab" data-tab="indexes">Indexes</button>
+            <button class="nav-tab" data-tab="statistics">Statistics</button>
+        </nav>
+
+        <!-- Tab Content -->
+        <main class="main-content">
+            <!-- Console Tab -->
+            <div id="console-tab" class="tab-content active">
+                <div class="console-section">
+                    <h2>Query Console</h2>
+                    <div class="query-builder">
+                        <div class="form-group">
+                            <label for="collection-select">Collection:</label>
+                            <select id="collection-select" class="form-control">
+                                <option value="">-- Select Collection --</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label for="query-type">Operation:</label>
+                            <select id="query-type" class="form-control">
+                                <option value="find">Find</option>
+                                <option value="insert">Insert</option>
+                                <option value="update">Update</option>
+                                <option value="delete">Delete</option>
+                                <option value="aggregate">Aggregate</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label for="query-input">Query (JSON):</label>
+                            <textarea id="query-input" class="form-control code-input" rows="8" placeholder='{"name": "John"}'></textarea>
+                        </div>
+                        <div class="form-actions">
+                            <button id="execute-query" class="btn btn-primary">Execute</button>
+                            <button id="clear-query" class="btn btn-secondary">Clear</button>
+                        </div>
+                    </div>
+                    <div class="query-results">
+                        <h3>Results</h3>
+                        <pre id="query-output" class="code-output"></pre>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Collections Tab -->
+            <div id="collections-tab" class="tab-content">
+                <div class="collections-section">
+                    <div class="section-header">
+                        <h2>Collections</h2>
+                        <button id="create-collection-btn" class="btn btn-primary">Create Collection</button>
+                    </div>
+                    <div id="collections-list" class="list-container"></div>
+                </div>
+            </div>
+
+            <!-- Documents Tab -->
+            <div id="documents-tab" class="tab-content">
+                <div class="documents-section">
+                    <div class="section-header">
+                        <h2>Documents</h2>
+                        <div class="form-group inline">
+                            <label for="doc-collection-select">Collection:</label>
+                            <select id="doc-collection-select" class="form-control">
+                                <option value="">-- Select Collection --</option>
+                            </select>
+                            <button id="load-documents" class="btn btn-primary">Load Documents</button>
+                        </div>
+                    </div>
+                    <div id="documents-list" class="list-container"></div>
+                </div>
+            </div>
+
+            <!-- Indexes Tab -->
+            <div id="indexes-tab" class="tab-content">
+                <div class="indexes-section">
+                    <div class="section-header">
+                        <h2>Indexes</h2>
+                        <div class="form-group inline">
+                            <label for="idx-collection-select">Collection:</label>
+                            <select id="idx-collection-select" class="form-control">
+                                <option value="">-- Select Collection --</option>
+                            </select>
+                            <button id="load-indexes" class="btn btn-primary">Load Indexes</button>
+                            <button id="create-index-btn" class="btn btn-success">Create Index</button>
+                        </div>
+                    </div>
+                    <div id="indexes-list" class="list-container"></div>
+                </div>
+            </div>
+
+            <!-- Statistics Tab -->
+            <div id="statistics-tab" class="tab-content">
+                <div class="statistics-section">
+                    <div class="section-header">
+                        <h2>Database Statistics</h2>
+                        <button id="refresh-stats" class="btn btn-primary">Refresh</button>
+                    </div>
+                    <div id="stats-content" class="stats-grid"></div>
+                </div>
+            </div>
+        </main>
+
+        <!-- Create Collection Modal -->
+        <div id="create-collection-modal" class="modal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3>Create Collection</h3>
+                    <button class="modal-close">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div class="form-group">
+                        <label for="new-collection-name">Collection Name:</label>
+                        <input type="text" id="new-collection-name" class="form-control" placeholder="my_collection">
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button id="confirm-create-collection" class="btn btn-primary">Create</button>
+                    <button class="btn btn-secondary modal-close">Cancel</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Create Index Modal -->
+        <div id="create-index-modal" class="modal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3>Create Index</h3>
+                    <button class="modal-close">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div class="form-group">
+                        <label for="index-name">Index Name:</label>
+                        <input type="text" id="index-name" class="form-control" placeholder="email_idx">
+                    </div>
+                    <div class="form-group">
+                        <label for="index-field">Field Path:</label>
+                        <input type="text" id="index-field" class="form-control" placeholder="email">
+                    </div>
+                    <div class="form-group">
+                        <label>
+                            <input type="checkbox" id="index-unique">
+                            Unique Index
+                        </label>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button id="confirm-create-index" class="btn btn-primary">Create</button>
+                    <button class="btn btn-secondary modal-close">Cancel</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

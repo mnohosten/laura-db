@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package lauradb.cluster;
 
+import "pkg/cluster/proto/common.proto";
+
 option go_package = "github.com/mnohosten/laura-db/pkg/cluster/proto";
 
 // Node represents a LauraDB node in the cluster
@@ -68,12 +70,6 @@ message ShardInfo {
   string shard_id = 1;
   string node_id = 2;
   repeated ChunkRange chunks = 3;
-}
-
-message ChunkRange {
-  string chunk_id = 1;
-  bytes min_key = 2;  // Minimum shard key value (serialized)
-  bytes max_key = 3;  // Maximum shard key value (serialized)
 }
 
 // Heartbeat messages for health monitoring

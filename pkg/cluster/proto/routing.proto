@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package lauradb.cluster;
 
+import "pkg/cluster/proto/common.proto";
+
 option go_package = "github.com/mnohosten/laura-db/pkg/cluster/proto";
 
 // QueryRequest represents a query to be routed to appropriate shard(s)
@@ -104,11 +106,6 @@ message ShardRouteInfo {
   string host = 3;
   int32 port = 4;
   repeated ChunkRange chunks = 5;
-}
-
-message ChunkRange {
-  bytes min_key = 1;
-  bytes max_key = 2;
 }
 
 // Config server messages for routing metadata

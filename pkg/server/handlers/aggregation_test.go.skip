@@ -1,0 +1,185 @@
+package handlers
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/go-chi/chi/v5"
+)
+
+// TestAggregate tests the aggregation pipeline
+func TestAggregate(t *testing.T) {
+	handlers, cleanup := setupTestHandlers(t)
+	defer cleanup()
+
+	// Create collection with test data
+	coll, _ := handlers.db.CreateCollection("orders")
+	coll.InsertOne(map[string]interface{}{"product": "A", "quantity": int64(10), "price": int64(100)})
+	coll.InsertOne(map[string]interface{}{"product": "B", "quantity": int64(5), "price": int64(200)})
+	coll.InsertOne(map[string]interface{}{"product": "A", "quantity": int64(15), "price": int64(100)})
+
+	// Aggregation pipeline: group by product and sum quantities
+	pipeline := []map[string]interface{}{
+		{
+			"$group": map[string]interface{}{
+				"_id":           "$product",
+				"totalQuantity": map[string]interface{}{"$sum": "$quantity"},
+			},
+		},
+	}
+	body, _ := json.Marshal(pipeline)
+
+	req := httptest.NewRequest("POST", "/orders/_aggregate", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("collection", "orders")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	w := httptest.NewRecorder()
+	handlers.Aggregate(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", w.Code)
+	}
+
+	var response map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &response)
+
+	if !response["ok"].(bool) {
+		t.Error("Expected ok=true")
+	}
+
+	result := response["result"].([]interface{})
+	if len(result) != 2 {
+		t.Errorf("Expected 2 groups, got %d", len(result))
+	}
+}
+
+// TestAggregateNotFound tests aggregation on non-existent collection
+func TestAggregateNotFound(t *testing.T) {
+	handlers, cleanup := setupTestHandlers(t)
+	defer cleanup()
+
+	pipeline := []map[string]interface{}{
+		{"$match": map[string]interface{}{"status": "active"}},
+	}
+	body, _ := json.Marshal(pipeline)
+
+	req := httptest.NewRequest("POST", "/nonexistent/_aggregate", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("collection", "nonexistent")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	w := httptest.NewRecorder()
+	handlers.Aggregate(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("Expected status 404, got %d", w.Code)
+	}
+}
+
+// TestAggregateInvalidJSON tests aggregation with invalid JSON
+func TestAggregateInvalidJSON(t *testing.T) {
+	handlers, cleanup := setupTestHandlers(t)
+	defer cleanup()
+
+	handlers.db.CreateCollection("test")
+
+	req := httptest.NewRequest("POST", "/test/_aggregate", bytes.NewBufferString("invalid"))
+	req.Header.Set("Content-Type", "application/json")
+
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("collection", "test")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	w := httptest.NewRecorder()
+	handlers.Aggregate(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("Expected status 400, got %d", w.Code)
+	}
+}
+
+// TestAggregateEmptyPipeline tests aggregation with empty pipeline
+func TestAggregateEmptyPipeline(t *testing.T) {
+	handlers, cleanup := setupTestHandlers(t)
+	defer cleanup()
+
+	coll, _ := handlers.db.CreateCollection("test")
+	coll.InsertOne(map[string]interface{}{"test": "data"})
+
+	pipeline := []map[string]interface{}{}
+	body, _ := json.Marshal(pipeline)
+
+	req := httptest.NewRequest("POST", "/test/_aggregate", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("collection", "test")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	w := httptest.NewRecorder()
+	handlers.Aggregate(w, req)
+
+	// Empty pipeline should succeed and return all documents
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", w.Code)
+	}
+}
+
+// TestAggregateMultipleStages tests aggregation with multiple stages
+func TestAggregateMultipleStages(t *testing.T) {
+	handlers, cleanup := setupTestHandlers(t)
+	defer cleanup()
+
+	coll, _ := handlers.db.CreateCollection("sales")
+	coll.InsertOne(map[string]interface{}{"product": "A", "amount": int64(100), "status": "completed"})
+	coll.InsertOne(map[string]interface{}{"product": "B", "amount": int64(200), "status": "completed"})
+	coll.InsertOne(map[string]interface{}{"product": "A", "amount": int64(150), "status": "pending"})
+
+	// Match completed, then group by product
+	pipeline := []map[string]interface{}{
+		{
+			"$match": map[string]interface{}{
+				"status": "completed",
+			},
+		},
+		{
+			"$group": map[string]interface{}{
+				"_id":         "$product",
+				"totalAmount": map[string]interface{}{"$sum": "$amount"},
+			},
+		},
+	}
+	body, _ := json.Marshal(pipeline)
+
+	req := httptest.NewRequest("POST", "/sales/_aggregate", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("collection", "sales")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	w := httptest.NewRecorder()
+	handlers.Aggregate(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", w.Code)
+	}
+
+	var response map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &response)
+
+	result := response["result"].([]interface{})
+	// Should have 2 groups (A and B, only completed)
+	if len(result) != 2 {
+		t.Errorf("Expected 2 groups, got %d", len(result))
+	}
+}

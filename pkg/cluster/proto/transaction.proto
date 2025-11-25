@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package lauradb.cluster;
 
+import "pkg/cluster/proto/common.proto";
+
 option go_package = "github.com/mnohosten/laura-db/pkg/cluster/proto";
 
 // Two-Phase Commit (2PC) protocol messages
@@ -38,13 +40,6 @@ message Operation {
   string collection = 2;
   OperationType op_type = 3;
   bytes data = 4;  // Serialized operation data
-}
-
-enum OperationType {
-  UNKNOWN_OP = 0;
-  INSERT = 1;
-  UPDATE = 2;
-  DELETE = 3;
 }
 
 message PrepareResponse {

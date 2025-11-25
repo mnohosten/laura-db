@@ -39,7 +39,7 @@ LauraDB is a production-grade educational MongoDB-like document database with co
   - Replication messages (oplog entries, sync requests)
   - Shard routing messages (query forwarding, results)
   - Two-phase commit messages (prepare, commit, abort)
-- [ ] Implement gRPC server for each LauraDB node
+- [x] Implement gRPC server for each LauraDB node
   - Listen for incoming cluster connections
   - Handle concurrent requests with connection pooling
   - TLS/mTLS support for secure communication
